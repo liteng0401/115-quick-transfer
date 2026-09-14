@@ -23,6 +23,8 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 APP_NAME = "115QuickTransfer"
+APP_VERSION = "1.4"          # 发布版本号：改这里，Info.plist 与 zip 名一起跟着变
+MIN_MACOS = "12.0"          # 最低系统版本
 DIST_APP = HERE / "dist" / f"{APP_NAME}.app"
 
 PY = sys.executable
@@ -137,6 +139,10 @@ def main() -> int:
         plist = plistlib.load(f)
     plist["LSUIElement"] = True
     plist["NSPrincipalClass"] = "NSApplication"
+    plist["CFBundleShortVersionString"] = APP_VERSION
+    plist["CFBundleVersion"] = APP_VERSION
+    plist["LSMinimumSystemVersion"] = MIN_MACOS
+    plist["NSHumanReadableCopyright"] = "MIT License"
     with open(plist_path, "wb") as f:
         plistlib.dump(plist, f)
 
@@ -147,10 +153,9 @@ def main() -> int:
     )
     # 5) 顺手打一个 zip，方便分发/备份
     try:
-        zip_path = HERE / "dist" / f"{APP_NAME}-v1.4.zip"
+        zip_path = HERE / "dist" / f"{APP_NAME}-v{APP_VERSION}.zip"
         subprocess.run(
-            ["ditto", "-c", "-k", "--sequesterRsrc", "--keepParent",
-             str(DIST_APP), str(zip_path)],
+            ["ditto", "-c", "-k", "--keepParent", str(DIST_APP), str(zip_path)],
             check=True,
         )
         print(f"压缩包：{zip_path}")
