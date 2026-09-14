@@ -116,28 +116,29 @@ def _join(base: str, name: str) -> str:
     return ("/" + name) if base == "/" else base.rstrip("/") + "/" + name
 
 
-# NSPathControl 会把 item 的图片【强行拉伸填满】它的图标格，完全忽略 NSImage 的 size
-# （实测：不管把 image.size 设成 13×13、13×9.4 还是 26×9.4，画出来都是同一个 22×控件高 的方块）。
-# 所以给它的图必须先按「图标格」的比例画好、符号居中，拉伸才成为无操作；
-# 否则符号会被拉成一条 —— 面包屑根节点那个硬盘图标的畸变就是这么来的。
-_PATH_ICON_BOX_W = 22.0
-_PATH_ICON_BOX_H_FALLBACK = 26.0
-_PATH_ICON_GLYPH_W = 13.0
+# NSPathControl 会把 item 的图片【非等比拉伸填满】它的图标格，完全忽略 NSImage 的 size。
+# 逐像素量下来图标格约 24×26，于是有两条结论：
+#   ① 图为等比画布时，符号的放大倍率 = 符号尺寸 ÷ 画布尺寸，与画布绝对大小无关
+#      （实测画布 22/30/44 宽、符号同为 18，渲染高度都是 7.33pt）；
+#   ② 图标能画多高只取决于「符号高 ÷ 画布高」这一个比例，把画布加宽并不会让它缩水。
+# 所以画布比例必须贴合图标格、符号要尽量填满画布。internaldrive 天然 18:13（偏扁），
+# 填满后墨迹高约为「115」文字高的 0.89 —— 这已是该符号在图标格里的上限。
+_PATH_ICON_BOX_W = 24.0     # 画布宽：24:26 实测最贴合图标格比例，符号不会被拉变形
+_PATH_ICON_BOX_H = 26.0     # 画布高
+_PATH_ICON_GLYPH_W = 23.2   # 符号宽：几乎填满画布，左右各留 0.4pt 防抗锯齿裁边
 
 
-def _breadcrumb_root_icon(box_h: float):
+def _breadcrumb_root_icon():
     """生成面包屑根节点图标：按图标格比例预拉伸，符号保持自身宽高比居中。"""
     sym = symbol("internaldrive", _PATH_ICON_GLYPH_W, NSColor.secondaryLabelColor())
     if sym is None:
         return None
-    box_w = _PATH_ICON_BOX_W
-    if not (8.0 <= float(box_h or 0.0) <= 60.0):
-        box_h = _PATH_ICON_BOX_H_FALLBACK
+    box_w, box_h = _PATH_ICON_BOX_W, _PATH_ICON_BOX_H
     gw, gh = sym.size()
     if gw <= 0 or gh <= 0:
         return None
     img = NSImage.alloc().initWithSize_((box_w, box_h))
-    for scale in (1, 2):
+    for scale in (1, 2, 3):
         px, py = int(round(box_w * scale)), int(round(box_h * scale))
         rep = NSBitmapImageRep.alloc().initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel_(
             None, px, py, 8, 4, True, False, NSDeviceRGBColorSpace, 0, 0)
@@ -336,6 +337,16 @@ class _TransferPanel:
         tv.setAutomaticDashSubstitutionEnabled_(False)
         tv.setAutomaticTextReplacementEnabled_(False)
         tv.setAutoresizingMask_(NSViewWidthSizable)
+        # NSTextView 默认 textContainerInset 为 (0,0)，文字只靠 5pt 的
+        # lineFragmentPadding 撑着 —— 于是文字左边缘落在 5pt、第一行顶落在 0pt，
+        # 而 placeholder 在 12pt / 9pt 处：两者既没左对齐，插入光标还会顶到框的上边界。
+        # 这里把内边距补齐：
+        #   左：inset.x(7) + lineFragmentPadding(5) = 12pt，与 placeholder 文字左缘齐
+        #   上：inset.y(7) 让第一行墨迹顶落在 ≈9pt，与 placeholder 墨迹顶齐
+        try:
+            tv.setTextContainerInset_((7.0, 7.0))
+        except Exception:  # noqa: BLE001
+            pass
         tv.setDelegate_(self._bridge)
         scroll.setDocumentView_(tv)
         card.addSubview_(scroll)
@@ -401,6 +412,14 @@ class _TransferPanel:
         table.setHeaderView_(None)
         table.setRowHeight_(32.0)
         table.setAllowsMultipleSelection_(False)
+        # NSTableView 默认刷一层不透明的 controlBackgroundColor（浅色下就是纯白），
+        # 糊在半透明卡片上会跟上方链接框割裂成两种底色。置空让它透出卡片自身的底色，
+        # 实测两边灰度都是 0.953，观感统一。
+        try:
+            table.setBackgroundColor_(NSColor.clearColor())
+            table.setUsesAlternatingRowBackgroundColors_(False)
+        except Exception:  # noqa: BLE001
+            pass
         table.setDataSource_(self._bridge)
         table.setDelegate_(self._bridge)
         table.setTarget_(self._bridge)
@@ -569,16 +588,11 @@ class _TransferPanel:
         if pc is None:
             return
         items = []
-        box_h = 0.0
-        try:
-            box_h = pc.frame().size.height or pc.bounds().size.height or 0.0
-        except Exception:  # noqa: BLE001
-            box_h = 0.0
         for i, (name, _cid) in enumerate(self._crumbs):
             item = NSPathControlItem.alloc().init()
             item.setTitle_("115" if i == 0 else (name or "/"))
             if i == 0:
-                img = _breadcrumb_root_icon(box_h)
+                img = _breadcrumb_root_icon()
                 if img is not None:
                     item.setImage_(img)
             items.append(item)
