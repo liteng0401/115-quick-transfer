@@ -82,7 +82,9 @@ python3 -m venv .venv
 # 产物：dist/115QuickTransfer.app  +  dist/115QuickTransfer-vX.Y.zip
 ```
 
-打包脚本会自动渲染高清菜单栏图标、写入 `LSUIElement`（菜单栏常驻、不占 Dock）并做 ad-hoc 签名。
+`build_app.py` 会先调用 `make_icons.py`，从 `assets/src/` 里的原图生成**应用图标**（`AppIcon.icns` → `CFBundleIconFile`）和 **1x/2x/3x 三档菜单栏模板图**，再交给 PyInstaller 打包（`--icon`）、写入 `LSUIElement`（菜单栏常驻、不占 Dock）并做 ad-hoc 签名。
+
+图标要换成别的，只改 `assets/src/app-icon.png`（应用图标，方形、建议 1024px）与 `assets/src/menu-icon-line.png`（菜单栏图标，纯黑线条 + 白底）后重新打包即可；菜单栏图标用实心还是线稿由 `make_icons.py` 顶部常量控制。
 
 ---
 
@@ -218,7 +220,8 @@ python3 -m venv .venv
 ├── dir_picker.py     # 简化版目录选择窗口（回退路径）
 ├── q115_engine.py    # 115 引擎：扫码登录 / 目录 / 云下载任务（纯逻辑，无 UI）
 ├── build_app.py      # 打包脚本（PyInstaller → .app）
-├── assets/           # 菜单栏图标（由 build_app.py 渲染生成）
+├── make_icons.py     # 图标生成：原图 → AppIcon.icns + 菜单栏 1x/2x/3x 模板图
+├── assets/           # 图标成品（assets/src/ 放原图，改图标只动 src）
 └── requirements.txt
 ```
 

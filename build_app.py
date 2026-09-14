@@ -23,70 +23,11 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 APP_NAME = "115QuickTransfer"
-APP_VERSION = "1.4.10"        # 发布版本号：改这里，Info.plist 与 zip 名一起跟着变
+APP_VERSION = "1.4.11"        # 发布版本号：改这里，Info.plist 与 zip 名一起跟着变
 MIN_MACOS = "12.0"          # 最低系统版本
 DIST_APP = HERE / "dist" / f"{APP_NAME}.app"
 
 PY = sys.executable
-
-
-def _render_symbol_icon(symbol_name: str, size: int, out: Path) -> bool:
-    """把 macOS SF Symbol 渲染成一张精确尺寸的高清 PNG 模板图标。
-
-    直接用矢量符号生成 1x / 2x 图标，保证菜单栏放大时仍然锐利，
-    同时给 rumps 的初始化阶段留一个可靠的 fallback。
-    """
-    try:
-        from AppKit import (
-            NSBezierPath,
-            NSBitmapImageRep,
-            NSColor,
-            NSGraphicsContext,
-            NSImage,
-            NSMakeRect,
-            NSPNGFileType,
-        )
-    except Exception:  # noqa: BLE001
-        return False
-
-    img = NSImage.imageWithSystemSymbolName_accessibilityDescription_(symbol_name, None)
-    if img is None:
-        return False
-
-    # 精确控制输出像素：1x = 18px，@2x = 36px，避免 lockFocus 受屏幕缩放影响
-    rep = NSBitmapImageRep.alloc().initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel_(
-        None, size, size, 8, 4, True, False, "NSDeviceRGBColorSpace", 0, 0
-    )
-    rep.setSize_((size, size))
-
-    ctx = NSGraphicsContext.graphicsContextWithBitmapImageRep_(rep)
-    NSGraphicsContext.saveGraphicsState()
-    NSGraphicsContext.setCurrentContext_(ctx)
-
-    NSColor.clearColor().set()
-    NSBezierPath.fillRect_(NSMakeRect(0, 0, size, size))
-    # 让符号占满画布 85%，留出一点边距，视觉上和系统菜单栏图标对齐。
-    # 按符号自身宽高比居中绘制 —— 方形 rect 会把非正方形符号拉变形。
-    inset = size * 0.075
-    box = size - inset * 2
-    sw, sh = img.size()
-    if sw > 0 and sh > 0:
-        if sw >= sh:
-            dw, dh = box, box * sh / sw
-        else:
-            dw, dh = box * sw / sh, box
-    else:
-        dw = dh = box
-    img.drawInRect_(NSMakeRect((size - dw) / 2.0, (size - dh) / 2.0, dw, dh))
-
-    NSGraphicsContext.restoreGraphicsState()
-
-    png = rep.representationUsingType_properties_(NSPNGFileType, None)
-    if png is None:
-        return False
-    out.parent.mkdir(parents=True, exist_ok=True)
-    png.writeToFile_atomically_(str(out), True)
-    return True
 
 
 def main() -> int:
@@ -94,13 +35,13 @@ def main() -> int:
     os.environ["PYINSTALLER_CONFIG_DIR"] = str(HERE / ".pyinstaller-cache")
     (HERE / ".pyinstaller-cache").mkdir(parents=True, exist_ok=True)
 
-    # 0) 先生成高清菜单栏图标（和 app_main 里运行时用的是同一个符号）
-    try:
-        _render_symbol_icon("icloud.and.arrow.down.fill", 18, HERE / "assets" / "iconTemplate.png")
-        _render_symbol_icon("icloud.and.arrow.down.fill", 36, HERE / "assets" / "iconTemplate@2x.png")
-        print("已生成高清菜单栏图标")
-    except Exception as e:  # noqa: BLE001
-        print(f"（图标生成跳过：{e}）")
+    # 0) 从 assets/src 里的原图生成图标资源：
+    #    · AppIcon.icns（应用图标，给 PyInstaller 用）
+    #    · iconTemplate.png / @2x / @3x（菜单栏模板图，给 app_main 运行时用）
+    #    放到打包流程里而不是手工跑脚本，是为了避免"改了原图忘了重新生成图标"。
+    import make_icons
+
+    make_icons.generate()
 
     # 1) 清理旧的 dist/build
     for d in (HERE / "dist", HERE / "build"):
@@ -114,6 +55,9 @@ def main() -> int:
         str(HERE / "app_main.py"),
         "--name", APP_NAME,
         "--windowed",
+        # 应用图标（访达/启动台里显示的那个）。之前一直没传，用的是 PyInstaller
+        # 自带的默认图标。
+        "--icon", str(HERE / "assets" / "AppIcon.icns"),
         "--noconfirm",
         "--clean",
         "--distpath", str(HERE / "dist"),
@@ -121,6 +65,7 @@ def main() -> int:
         "--specpath", str(HERE / "build"),
         "--add-data", f"{HERE / 'assets' / 'iconTemplate.png'}{os.pathsep}assets",
         "--add-data", f"{HERE / 'assets' / 'iconTemplate@2x.png'}{os.pathsep}assets",
+        "--add-data", f"{HERE / 'assets' / 'iconTemplate@3x.png'}{os.pathsep}assets",
         "--collect-all", "p115client",
         "--hidden-import", "requests",
         "--hidden-import", "qrcode",

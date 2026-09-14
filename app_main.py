@@ -155,11 +155,12 @@ def notify(title: str, msg: str) -> None:
         pass
 
 
-def _make_status_icon(symbol: str = "icloud.and.arrow.down.fill", base: int = 18):
-    """从 SF Symbol 生成一张多分辨率（1x/2x/3x）的菜单栏模板图标。
+def _make_symbol_status_icon(symbol: str = "icloud.and.arrow.down.fill", base: int = 18):
+    """【兜底】用系统 SF Symbol 现场画一张多分辨率菜单栏模板图标。
 
-    macOS 状态栏会在不同 DPI 的屏幕上自动挑选合适的 NSBitmapImageRep，
-    这样 Retina 屏上就不再是 1x PNG 被硬拉上去后的模糊效果。
+    正常路径见下面的 _make_status_icon：图标已经换成自定义图形（磁铁 + 下载
+    箭头 + 115 文件夹），只能从位图来。只有在 assets 里的图标文件缺失时
+    （例如手工删了、或打包漏了 add-data），才退回这里保证菜单栏图标不消失。
     """
     try:
         from AppKit import (
@@ -208,6 +209,54 @@ def _make_status_icon(symbol: str = "icloud.and.arrow.down.fill", base: int = 18
         rep.setSize_((base, base))
         img.addRepresentation_(rep)
     img.setTemplate_(True)
+    return img
+
+
+def _make_status_icon(base: int = 18):
+    """加载 assets 里预渲染好的多分辨率菜单栏模板图标。
+
+    图标是自定义图形（见 make_icons.py），所以只能在构建时用图像库渲染成
+    1x/2x/3x 三张位图，运行时交给 AppKit 按屏幕 DPI 自选 —— Retina 上取 @2x/3x
+    不会被拉伸变糊。
+
+    位图由 make_icons.py 用 LANCZOS 预缩放，比让 AppKit 临时缩放更锐利；
+    缩放时必须先预乘 alpha，否则边缘会出现一圈浅色光晕。
+
+    三张都不在时退回 SF Symbol（_make_symbol_status_icon），保证菜单栏图标
+    不会凭空消失。
+    """
+    try:
+        from AppKit import NSImage
+    except Exception:  # noqa: BLE001
+        return None
+
+    img = NSImage.alloc().initWithSize_((base, base))
+    loaded = 0
+    for scale in (1, 2, 3):
+        name = "iconTemplate.png" if scale == 1 else f"iconTemplate@{scale}x.png"
+        path = ASSET_DIR / name
+        if not path.exists():
+            continue
+        # 读 PNG 必须走 NSImage：NSBitmapImageRep 没有
+        # initWithContentsOfFile:（踩过 —— 报 AttributeError，图标直接不显示）。
+        # 再由 NSImage 取出它已经解好的位图 rep，逐个改 size 后装进合成图。
+        try:
+            src = NSImage.alloc().initWithContentsOfFile_(str(path))
+            reps = list(src.representations()) if src is not None else []
+        except Exception:  # noqa: BLE001
+            continue
+        # 单个文件出问题只跳过它 —— 不能因为一张图坏了就整个图标消失
+        for rep in reps:
+            # 位图像素是 base×scale，但要告诉 AppKit「这张图代表 base×base 点」
+            rep.setSize_((base, base))
+            img.addRepresentation_(rep)
+            loaded += 1
+
+    if loaded == 0:
+        _bootstrap_log("ICON", "assets 图标缺失，回退 SF Symbol")
+        return _make_symbol_status_icon(base=base)
+
+    img.setTemplate_(True)   # 模板模式：菜单栏自动适配深浅色
     return img
 
 
@@ -380,7 +429,7 @@ class Q115App(rumps.App):
             quit_button=None,
         )
         # rumps 在 run() 中初始化状态栏时会读取 self._icon_nsimage，
-        # 这里把 PNG fallback 替换成 1x/2x/3x 的矢量符号渲染图。
+        # 这里替换成 assets 里 1x/2x/3x 三种分辨率的自定义图标。
         _apply_status_icon(self)
         # 没有主菜单 = 输入框里 Cmd+C/V/A 全部失灵（见 _install_main_menu 注释）。
         # 必须在 app.run() 之前装：AppKit 只在 mainMenu 为空时才造默认菜单，

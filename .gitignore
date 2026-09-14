@@ -49,3 +49,6 @@ config.json
 cookies.txt
 *_cookies.txt
 *.log
+
+# 图标生成的中间产物（.icns 才是要提交的成品）
+assets/AppIcon.iconset/
