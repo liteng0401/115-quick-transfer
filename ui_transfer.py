@@ -67,6 +67,7 @@ from AppKit import (
     NSTextView,
     NSView,
     NSViewWidthSizable,
+    NSWindowBelow,
 )
 from Foundation import NSTimer, NSRunLoop, NSRunLoopCommonModes
 
@@ -363,7 +364,18 @@ class _TransferPanel:
         ph = make_label("粘贴磁力 / ed2k / http 链接", 13.0, 0.0,
                         NSColor.placeholderTextColor())
         place(ph, 11, 8, 300, 18, card)
-        card.addSubview_(ph)
+        # 【必须把 placeholder 压在滚动视图下层】这里踩过坑，两件事都由它决定：
+        #   · 鼠标事件按子视图「从后往前」的顺序派发。放在上层时，这一带
+        #     hitTest 返回的是这个标签而不是输入框 —— 点上去输入框拿不到焦点，
+        #     没有插入光标、打不了字、Cmd+V 也无处可去；鼠标停在上面也不会
+        #     变成文本 I 型光标。（实测：这一带点不到输入框。）
+        #   · 插入光标是 NSTextView 自己画的。放到底层后它才盖在 placeholder
+        #     文字之上，和系统原生输入框的表现一致。
+        # 注意别对 card 调这个方法：make_card() 给的是 NSBox，往它身上 addSubview
+        # 会被转发到内部那一层，排序参数落不到实处（实测排了等于没排）。
+        # 真正承载子视图的是滚动视图的父层，直接对它排。
+        holder = scroll.superview() or card
+        holder.addSubview_positioned_relativeTo_(ph, NSWindowBelow, scroll)
         self._ph_label = ph
         ph.setHidden_(bool(self._clip))
 

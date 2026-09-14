@@ -177,6 +177,82 @@ def _apply_status_icon(app) -> None:
 
 
 # ---------------------------------------------------------------------------
+# 主菜单（应用菜单 + 编辑菜单）
+# ---------------------------------------------------------------------------
+
+def _install_main_menu(quit_target=None) -> None:
+    """给应用装一个最小主菜单：应用菜单 + 编辑菜单。
+
+    不是可有可无的装饰 —— macOS 上 Cmd+C / Cmd+V / Cmd+A 这类组合键是由
+    【主菜单里的快捷键】路由的，不是文本框自带的能力。rumps 只把菜单挂在
+    状态栏按钮上，从不设 NSApplication 的主菜单，于是这个 app 的输入框里
+    Cmd+V 一直是哑的。（实测：装上「编辑」菜单后，同一个按键事件就能正常粘贴。）
+
+    quit_target：接收「退出」动作的对象，需实现 menuQuit:；传 None 则让该动作
+    走响应链（退化成 AppKit 默认行为）。
+    """
+    try:
+        from AppKit import (  # noqa: PLC0415
+            NSApplication,
+            NSMenu,
+            NSMenuItem,
+            NSEventModifierFlagCommand,
+            NSEventModifierFlagOption,
+        )
+    except Exception:  # noqa: BLE001
+        return
+    try:
+        main = NSMenu.alloc().init()
+
+        # --- 应用菜单（macOS 会把这一项显示成应用名，标题其实是被忽略的）---
+        app_item = NSMenuItem.alloc().init()
+        app_item.setTitle_(APP_DISPLAY)
+        main.addItem_(app_item)
+
+        app_menu = NSMenu.alloc().init()
+        app_menu.addItemWithTitle_action_keyEquivalent_(
+            "隐藏 " + APP_DISPLAY, "hide:", "h")
+        hide_others = app_menu.addItemWithTitle_action_keyEquivalent_(
+            "隐藏其他", "hideOtherApplications:", "h")
+        hide_others.setKeyEquivalentModifierMask_(
+            NSEventModifierFlagCommand | NSEventModifierFlagOption)
+        app_menu.addItemWithTitle_action_keyEquivalent_(
+            "显示全部", "unhideAllApplications:", "")
+        app_menu.addItem_(NSMenuItem.separatorItem())
+        quit_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "退出 " + APP_DISPLAY, "menuQuit:", "q")
+        if quit_target is not None:
+            quit_item.setTarget_(quit_target)   # 走和状态栏「退出」同一条清理路径
+        app_menu.addItem_(quit_item)
+        app_item.setSubmenu_(app_menu)
+
+        # --- 编辑菜单：上面那些快捷键全指望着它 ---
+        edit_item = NSMenuItem.alloc().init()
+        edit_item.setTitle_("编辑")
+        main.addItem_(edit_item)
+
+        edit_menu = NSMenu.alloc().initWithTitle_("编辑")
+        for title, selector, key in (
+            ("撤销", "undo:", "z"),
+            ("重做", "redo:", "Z"),
+            ("剪切", "cut:", "x"),
+            ("拷贝", "copy:", "c"),
+            ("粘贴", "paste:", "v"),
+            ("全选", "selectAll:", "a"),
+        ):
+            # target 留空 = 沿响应链派发，谁在前台就发给谁（输入框在前台就是它）
+            edit_menu.addItemWithTitle_action_keyEquivalent_(title, selector, key)
+        edit_menu.insertItem_atIndex_(NSMenuItem.separatorItem(), 2)  # 「重做」后加分隔线
+        edit_item.setSubmenu_(edit_menu)
+
+        NSApplication.sharedApplication().setMainMenu_(main)
+        _bootstrap_log("MENU", "main menu installed (app + edit)")
+    except Exception as e:  # noqa: BLE001
+        _bootstrap_log("MENU", f"install failed: {type(e).__name__}: {e}")
+
+
+
+# ---------------------------------------------------------------------------
 # 菜单栏应用
 # ---------------------------------------------------------------------------
 
@@ -211,6 +287,10 @@ class Q115App(rumps.App):
         # rumps 在 run() 中初始化状态栏时会读取 self._icon_nsimage，
         # 这里把 PNG fallback 替换成 1x/2x/3x 的矢量符号渲染图。
         _apply_status_icon(self)
+        # 没有主菜单 = 输入框里 Cmd+C/V/A 全部失灵（见 _install_main_menu 注释）。
+        # 必须在 app.run() 之前装：AppKit 只在 mainMenu 为空时才造默认菜单，
+        # 先装上的话会被原样保留。
+        _install_main_menu(self)
 
     # ---------- 小工具 ----------
 
@@ -586,6 +666,14 @@ class Q115App(rumps.App):
 
     def on_refresh_status(self, _sender=None) -> None:
         self.update_ui()
+
+    def menuQuit_(self, _sender=None) -> None:
+        """主菜单「退出 115 秒转」/ Cmd+Q 的入口。
+
+        刻意复用 on_quit：里面的 abortModal、二维码临时文件清理一个都不能少，
+        否则又会出现「退出后打不开」那一类问题。
+        """
+        self.on_quit(_sender)
 
     def on_quit(self, _sender=None) -> None:
         # 如果还有模态窗口（如目录选择/转存面板），先把它结束掉，
