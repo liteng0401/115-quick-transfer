@@ -23,7 +23,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 APP_NAME = "115QuickTransfer"
-APP_VERSION = "1.4.4"        # 发布版本号：改这里，Info.plist 与 zip 名一起跟着变
+APP_VERSION = "1.4.5"        # 发布版本号：改这里，Info.plist 与 zip 名一起跟着变
 MIN_MACOS = "12.0"          # 最低系统版本
 DIST_APP = HERE / "dist" / f"{APP_NAME}.app"
 

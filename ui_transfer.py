@@ -1095,6 +1095,19 @@ class _TransferBridge(NSObject):
     def textDidChange_(self, _notif) -> None:
         self.owner.do_text_changed()
 
+    def textViewDidChangeSelection_(self, _notif) -> None:
+        """組字（輸入法 marked text）期間唯一還會響的那條路。
+
+        踩过的坑：NSTextView 在組字期間**不發 NSTextDidChangeNotification**，
+        所以只挂上面那个 textDidChange: 是不够的 —— 用中文输入法打字时，
+        placeholder 会一直悬在输入框里、和組字区叠成一团（用户就是这么撞见的）。
+        实测組字 "h" 时：textDidChange: 0 次，而选区变化 2 次、文本存储编辑 2 次。
+        macOS 原生输入框的表现是「一开始組字，placeholder 就消失」，这里对齐。
+        选区变化比文本变化频繁（点一下、按个方向键都会响），但 _refresh_count()
+        是幂等且便宜的，多跑几次没有副作用。
+        """
+        self.owner.do_text_changed()
+
     def textDidBeginEditing_(self, _notif) -> None:
         self.owner.do_focus_changed(True)
 
