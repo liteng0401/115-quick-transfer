@@ -84,7 +84,16 @@ python3 -m venv .venv
 
 `build_app.py` 会先调用 `make_icons.py`，从 `assets/src/` 里的原图生成**应用图标**（`AppIcon.icns` → `CFBundleIconFile`）和 **1x/2x/3x 三档菜单栏模板图**，再交给 PyInstaller 打包（`--icon`）、写入 `LSUIElement`（菜单栏常驻、不占 Dock）并做 ad-hoc 签名。
 
-图标要换成别的，只改 `assets/src/app-icon.png`（应用图标，方形、建议 1024px）与 `assets/src/menu-icon-line.png`（菜单栏图标，纯黑线条 + 白底）后重新打包即可；菜单栏图标用实心还是线稿由 `make_icons.py` 顶部常量控制。
+图标要换成别的，只改 `assets/src/` 里的原图后重新打包即可：
+
+- `app-icon.png` —— 应用图标原图（方形、建议 1024px）。
+- `menu-icon-folder.png` —— 菜单栏图标原图（浅色文件夹 + U 形镂空，当前默认）。
+  注意它是**没有 alpha 通道的 RGB 图**：「透明棋盘格」是画进像素的底纹，
+  `make_icons.py` 会自己把图形从棋盘格里认出来（外轮廓用局部标准差判别、
+  U 形洞口用亮度梯度定边后做几何重建），所以换成同类底纹的新图也能直接用。
+- `menu-icon-line.png` —— 备用：纯黑线条 + 白底（笔画在 18pt 下会发灰，不推荐）。
+
+菜单栏取哪种图由 `make_icons.py` 顶部的 `MENU_KIND` 控制（`folder` / `solid` / `line`）。
 
 ---
 

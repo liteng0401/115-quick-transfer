@@ -4,8 +4,9 @@
 make_icons.py — 从 assets/src/ 里的原图生成两个图标资源
 
   输入：
-    assets/src/app-icon.png      桌面图标原图（蓝色圆角方块 + 白色实心图形）
-    assets/src/menu-icon-line.png 菜单栏图标原图（黑线稿 + 白底）
+    assets/src/app-icon.png       桌面图标原图（蓝色圆角方块 + 白色实心图形）
+    assets/src/menu-icon-folder.png 菜单栏图标原图（浅色文件夹 + U 形镂空）
+    assets/src/menu-icon-line.png 备用：黑线稿 + 白底（MENU_KIND="line" 时才用）
 
   输出：
     assets/AppIcon.icns          macOS 应用图标（含 16~1024 全尺寸）
@@ -22,6 +23,12 @@ make_icons.py — 从 assets/src/ 里的原图生成两个图标资源
   · 桌面原图是"蓝色圆角方块铺满整张画布 + 白底四角"。macOS 原生图标是
     824/1024 的圆角方块居中、四周透明，因此这里缩放并留白，避免在访达里
     比别的 App 大一圈。
+  · 菜单栏原图（menu-icon-folder.png）是**没有 alpha 通道的 RGB 图**，
+    "透明棋盘格"是直接画进像素的。而且洞内叠了内阴影、把棋盘格压暗了。
+    所以不能靠亮度阈值，也不能照抄像素边界（会发毛）——做法是：
+    外轮廓用局部标准差判别（棋盘格有高频交替，文件夹平滑），
+    U 形洞口先用灵敏阈值粗定位、再用亮度梯度精确定四条竖边，
+    最后按"圆角矩形 + 半圆底"做几何重建。小尺寸下边缘才干净。
 
 用法：
   python3 make_icons.py                      # 生成全部图标
@@ -31,6 +38,7 @@ make_icons.py — 从 assets/src/ 里的原图生成两个图标资源
 from __future__ import annotations
 
 import argparse
+import math
 import subprocess
 import sys
 from pathlib import Path
@@ -40,6 +48,7 @@ from PIL import Image, ImageChops, ImageFilter
 HERE = Path(__file__).resolve().parent
 SRC_DIR = HERE / "assets" / "src"
 APP_SRC = SRC_DIR / "app-icon.png"
+MENU_FOLDER_SRC = SRC_DIR / "menu-icon-folder.png"
 MENU_SRC = SRC_DIR / "menu-icon-line.png"
 
 # macOS 原生应用图标里，圆角方块占整张画布的比例（824 / 1024）
@@ -49,15 +58,14 @@ APP_BODY_RATIO = 824 / 1024
 MENU_BASE = 18
 MENU_INSET = 0.055          # 上下各留 5.5% ⇒ 内容高 ≈ 89% × 18pt ≈ 16pt
 
-# 菜单栏取图方式（2026-09-14 在本机真实菜单栏里 A/B 选出来的）：
-#   "solid" —— 用桌面图标里的白色实心形状（高对比、粗壮）
-#   "line"  —— 用原线稿，按 MENU_LINE_THICKEN 加粗（保留原设计的线条风格）
+# 菜单栏取图方式（都在本机真实菜单栏里 A/B 截图对比过）：
+#   "folder" —— 用 menu-icon-folder.png：浅色文件夹 + U 形镂空（当前默认）
+#   "solid"  —— 用桌面图标里的白色实心形状（磁铁 + 下载箭头 + 115 文件夹）
+#   "line"   —— 用黑线稿，按 MENU_LINE_THICKEN 加粗（笔画太细，18pt 下会发灰）
 #
-# 为什么默认 solid：把两个候选都装到真实菜单栏里截图对比过 —— 线稿版在 18pt 下
-# 笔画只有约 1 个设备像素、整体发灰，明显比相邻的系统图标轻；实心版和旧的
-# SF Symbol 云图标一个量级，一眼能认出"磁铁 + 下载 + 115 文件夹"。
-# 线稿版并没有删掉，改这一个常量即可切回。
-MENU_KIND = "solid"
+# 2026-09-14 用户指定把菜单栏图标换成 menu-icon-folder.png，故默认改为 "folder"。
+# 另外两种没删，改这一个常量即可切回。
+MENU_KIND = "folder"
 MENU_LINE_THICKEN = 12      # 线稿向两侧各膨胀的像素数（原图 1024 尺度）
 MENU_SOLID_FILL_HOLES = False  # True = 把镂空的「5」填实
 # 只给"下载箭头"那个连通块单独加粗（向两侧各 N 像素，原图 1024 尺度）。
@@ -169,6 +177,315 @@ def write_icns(master: Image.Image, icns_path: Path, iconset_dir: Path | None = 
     subprocess.run(["iconutil", "-c", "icns", str(iconset), "-o", str(icns_path)], check=True)
 
 
+# -------------------------------------------- 从"假透明棋盘格"底图里抠形状
+#
+# 源图把透明棋盘格画成了真实像素（无 alpha 通道）。判别思路：
+#   · 棋盘格 = 高频交替 → 局部标准差高（实测 ≈10~11）
+#   · 文件夹内部平滑     → 局部标准差低（实测 ≈0~2）
+#   · 洞内的棋盘格被内阴影压暗、对比度下降 → 用更灵敏的阈值，且边界会外扩
+#     约 24px，所以还要用亮度梯度把四条竖边精确定回来。
+_F_STD_R = 24          # 局部标准差窗口半径（约 1.1 格棋盘格）
+_F_STD_BG = 6          # 背景阈值
+_F_STD_HOLE = 4        # 洞内阈值（更灵敏）
+_F_GRAD = 8            # 梯度噪声地板。真实 U 边界梯度 32~70，洞内棋盘格格边 16~21，
+                       # 所以不能只靠固定阈值：统一取"最强的 4 个峰"再校验正负号模式
+_F_TOP_EDGES = 4       # 每行取最强的几条边
+_F_FRAME = 8           # 图像最外圈窗口被截断 → 直接当背景，否则会堵死洪水填充
+_F_ISLAND = 7000       # 洞内面积小于此值的实体孤岛 → 并进洞里
+_F_EDGE_GAP = 12       # 相邻多近的梯度峰算同一条边
+
+
+def _local_std(L: bytes, w: int, h: int, radius: int) -> bytearray:
+    """局部标准差图（积分图，O(N)）。"""
+    pw = w + 1
+    S = [0] * (pw * (h + 1))
+    Q = [0] * (pw * (h + 1))
+    for y in range(h):
+        rs = rq = 0
+        base = (y + 1) * pw
+        prev = y * pw
+        rb = y * w
+        for x in range(w):
+            v = L[rb + x]
+            rs += v
+            rq += v * v
+            S[base + x + 1] = S[prev + x + 1] + rs
+            Q[base + x + 1] = Q[prev + x + 1] + rq
+
+    def win(tab, x0, y0, x1, y1):
+        return (tab[y1 * pw + x1] - tab[y0 * pw + x1]
+                - tab[y1 * pw + x0] + tab[y0 * pw + x0])
+
+    out = bytearray(w * h)
+    for y in range(h):
+        y0 = max(0, y - radius)
+        y1 = min(h, y + radius + 1)
+        rb = y * w
+        for x in range(w):
+            x0 = max(0, x - radius)
+            x1 = min(w, x + radius + 1)
+            n = (x1 - x0) * (y1 - y0)
+            s = win(S, x0, y0, x1, y1)
+            q = win(Q, x0, y0, x1, y1)
+            m = s / float(n)
+            var = q / float(n) - m * m
+            v = int(var ** 0.5) if var > 0 else 0
+            out[rb + x] = 255 if v > 255 else v
+    return out
+
+
+def _largest_component(bits: bytearray, w: int, h: int) -> bytearray:
+    """只保留最大连通域（去掉零星噪点）。"""
+    seen = bytearray(w * h)
+    best = []
+    for i in range(w * h):
+        if seen[i] or not bits[i]:
+            continue
+        stack = [i]
+        seen[i] = 1
+        pts = []
+        while stack:
+            j = stack.pop()
+            pts.append(j)
+            x, y = j % w, j // w
+            for nx, ny in ((x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)):
+                if 0 <= nx < w and 0 <= ny < h:
+                    k = ny * w + nx
+                    if not seen[k] and bits[k]:
+                        seen[k] = 1
+                        stack.append(k)
+        if len(pts) > len(best):
+            best = pts
+    out = bytearray(w * h)
+    for i in best:
+        out[i] = 1
+    return out
+
+
+def _flood_from_frame(bits: bytearray, w: int, h: int, frame: int) -> bytearray:
+    """从最外 frame 像素的边框向内洪水填充。最外圈直接算背景。
+
+    必须这么做：贴近图像边界时局部窗口被截断，标准差会掉到阈值以下，
+    于是最外圈被误判成实体，把洪水填充整个堵死。
+    """
+    ext = bytearray(w * h)
+    stack = []
+    for y in range(h):
+        for x in range(w):
+            if x < frame or y < frame or x >= w - frame or y >= h - frame:
+                ext[y * w + x] = 1
+                stack.append(y * w + x)
+    seen = bytearray(w * h)
+    while stack:
+        i = stack.pop()
+        if seen[i]:
+            continue
+        seen[i] = 1
+        x, y = i % w, i // w
+        for nx, ny in ((x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)):
+            if 0 <= nx < w and 0 <= ny < h:
+                j = ny * w + nx
+                onframe = (nx < frame or ny < frame
+                           or nx >= w - frame or ny >= h - frame)
+                if not seen[j] and (bits[j] or onframe):
+                    stack.append(j)
+    out = bytearray(1 if seen[i] else 0 for i in range(w * h))
+    for y in range(h):
+        for x in range(w):
+            if x < frame or y < frame or x >= w - frame or y >= h - frame:
+                out[y * w + x] = 1
+    return out
+
+
+def _gradient_edges(L: bytes, w: int, row: int, lo: int, hi: int,
+                    thr: float, top: int = _F_TOP_EDGES) -> list:
+    """在一行剖面里找梯度边。返回 [(坐标, 带符号梯度)]，按坐标排序。
+
+    不能只靠固定阈值：洞内叠加内阴影后，棋盘格自身的格边梯度会升到 16~21，
+    已经盖过阈值；而真实 U 边界是 32~70。所以统一"取最强的 top 个峰"
+    （彼此间隔 > _F_EDGE_GAP），再由调用方校验正负号模式是否像 U。
+    thr 只当噪声地板用。
+    """
+    vals = [L[row * w + c] for c in range(lo, hi + 1)]
+    n = len(vals)
+    peaks = []
+    for i in range(3, n - 3):
+        g = (sum(vals[i + 1:i + 4]) - sum(vals[i - 3:i])) / 3.0
+        if abs(g) >= thr:
+            peaks.append((abs(g), i, g))
+    peaks.sort(key=lambda t: -t[0])
+    picked = []
+    for mag, i, g in peaks:
+        if all(abs(i - p[1]) > _F_EDGE_GAP for p in picked):
+            picked.append((mag, i, g))
+            if len(picked) >= top:
+                break
+    picked.sort(key=lambda t: t[1])
+    return [(lo + i, g) for _, i, g in picked]
+
+
+def _fill_small_islands(hole: bytearray, solid: bytearray, w: int, h: int,
+                        max_area: int) -> bytearray:
+    """把洞口内部的小实体孤岛并进洞里。
+
+    竖条顶端的圆角块因为被压暗、局部标准差掉到阈值以下，会被误判成实体，
+    在洞口里留下两个小疙瘩。判据：面积小 + 包围盒落在洞口包围盒之内。
+    """
+    hx = [i % w for i in range(w * h) if hole[i]]
+    hy = [i // w for i in range(w * h) if hole[i]]
+    if not hx:
+        return hole
+    x0, x1, y0, y1 = min(hx), max(hx), min(hy), max(hy)
+    seen = bytearray(w * h)
+    out = bytearray(hole)
+    for i in range(w * h):
+        if out[i] or seen[i] or not solid[i]:
+            continue
+        stack = [i]
+        seen[i] = 1
+        comp = []
+        while stack:
+            j = stack.pop()
+            comp.append(j)
+            x, y = j % w, j // w
+            for nx, ny in ((x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)):
+                if 0 <= nx < w and 0 <= ny < h:
+                    k = ny * w + nx
+                    if not seen[k] and not out[k] and solid[k]:
+                        seen[k] = 1
+                        stack.append(k)
+        cx = [j % w for j in comp]
+        cy = [j // w for j in comp]
+        if (len(comp) < max_area and min(cx) >= x0 and max(cx) <= x1
+                and min(cy) >= y0 and max(cy) <= y1):
+            for j in comp:
+                out[j] = 1
+    return out
+
+
+def _u_solid(w: int, h: int, x0: int, x1: int, y0: int, y1: int,
+             rt: float, rb: float) -> bytearray:
+    """圆角顶 + 半圆底的「U」形实心块。与舌板块做差即得洞口。"""
+    out = bytearray(w * h)
+    cx = (x0 + x1) / 2.0
+    for y in range(max(0, y0), min(h - 1, y1) + 1):
+        if y <= y1 - rb:
+            left, right = float(x0), float(x1)
+            if rt and y < y0 + rt:
+                dy = (y0 + rt) - y
+                if 0 <= dy < rt:
+                    dd = rt - math.sqrt(max(0.0, rt * rt - dy * dy))
+                    left, right = x0 + dd, x1 - dd
+        else:
+            dy = y - (y1 - rb)
+            if dy >= rb:
+                dy = rb - 1e-9
+            half = math.sqrt(max(0.0, rb * rb - dy * dy))
+            left, right = cx - half, cx + half
+        if right < left:
+            continue
+        li = max(0, int(math.floor(left)))
+        ri = min(w - 1, int(math.ceil(right)))
+        base = y * w
+        for x in range(li, ri + 1):
+            out[base + x] = 1
+    return out
+
+
+def folder_menu_master(src: Path = MENU_FOLDER_SRC) -> Image.Image:
+    """把「浅色文件夹 + U 形镂空」的源图转成干净的模板图母版（黑色 + alpha）。"""
+    im = Image.open(src).convert("L")
+    w, h = im.size
+    L = im.tobytes()
+
+    # 1) 外轮廓
+    std = _local_std(L, w, h, _F_STD_R)
+    bg = bytearray(1 if std[i] > _F_STD_BG else 0 for i in range(w * h))
+    bm = Image.frombytes("L", (w, h), bytes(255 if v else 0 for v in bg))
+    bm = bm.filter(ImageFilter.MinFilter(5)).filter(ImageFilter.MaxFilter(5))
+    bp = bm.load()
+    bg = bytearray(1 if bp[i % w, i // w] else 0 for i in range(w * h))
+    ext = _flood_from_frame(bg, w, h, _F_FRAME)
+    solid = _largest_component(bytearray(0 if ext[i] else 1 for i in range(w * h)), w, h)
+
+    # 平滑边界毛刺
+    sm = Image.frombytes("L", (w, h), bytes(255 if v else 0 for v in solid))
+    for _ in range(3):
+        sm = sm.filter(ImageFilter.MedianFilter(9))
+    sm = sm.filter(ImageFilter.MinFilter(3)).filter(ImageFilter.MaxFilter(3))
+    sm = sm.filter(ImageFilter.MaxFilter(3)).filter(ImageFilter.MinFilter(3))
+    smp = sm.load()
+    solid = _largest_component(
+        bytearray(1 if smp[i % w, i // w] else 0 for i in range(w * h)), w, h)
+
+    # 2) 洞口粗定位（限制在外轮廓内部）
+    inner = Image.frombytes("L", (w, h), bytes(255 if v else 0 for v in solid))
+    for _ in range(12):
+        inner = inner.filter(ImageFilter.MinFilter(3))
+    ip = inner.load()
+    cav = bytearray(1 if (std[i] > _F_STD_HOLE and ip[i % w, i // w]) else 0
+                    for i in range(w * h))
+    cm = Image.frombytes("L", (w, h), bytes(255 if v else 0 for v in cav))
+    cm = cm.filter(ImageFilter.MinFilter(3)).filter(ImageFilter.MaxFilter(3))
+    cm = cm.filter(ImageFilter.MaxFilter(3)).filter(ImageFilter.MinFilter(3))
+    cp = cm.load()
+    cav = _largest_component(
+        bytearray(1 if cp[i % w, i // w] else 0 for i in range(w * h)), w, h)
+    cav = _fill_small_islands(cav, solid, w, h, _F_ISLAND)
+
+    cx = [i % w for i in range(w * h) if cav[i]]
+    cy = [i // w for i in range(w * h) if cav[i]]
+    if not cx:
+        raise RuntimeError("菜单栏图标：没能从源图里抠出 U 形镂空")
+    cav_x0, cav_x1, cav_y0, cav_y1 = min(cx), max(cx), min(cy), max(cy)
+
+    # 3) 亮度梯度精确定四条竖边（洞内被压暗 → 粗定位的边界会外扩约 24px）
+    band_lo = cav_y0 + int(0.28 * (cav_y1 - cav_y0))
+    band_hi = cav_y0 + int(0.52 * (cav_y1 - cav_y0))
+    lo = max(0, cav_x0 - 40)
+    hi = min(w - 1, cav_x1 + 40)
+    As, Bls, As2, bs = [], [], [], []
+    for y in range(band_lo, band_hi + 1, 8):
+        e = _gradient_edges(L, w, y, lo, hi, _F_GRAD)
+        # U 的四条竖边必然是"暗-亮-暗-亮"交替：外左 / 舌板左 / 舌板右 / 外右
+        signs = [1 if g > 0 else -1 for _, g in e]
+        if len(e) == 4 and signs == [-1, 1, -1, 1]:
+            As.append(e[0][0])
+            Bls.append(e[1][0])
+            As2.append(e[2][0])
+            bs.append(e[3][0])
+    if len(As) < 3:
+        raise RuntimeError("菜单栏图标：没能从源图里量出 U 的四条竖边")
+    med = lambda v: sorted(v)[len(v) // 2]
+    A, Bl, a, b = med(As), med(Bls), med(As2), med(bs)
+
+    # 4) 纵向：用粗定位边界反推（洞外扩量 d 由竖边标定）
+    d = med([A - cav_x0, cav_x1 - b])
+    cidx = (Bl + a) // 2
+    counter_top = min(y for y in range(h) if cav[y * w + cidx]) if any(
+        cav[y * w + cidx] for y in range(h)) else None
+    if counter_top is None:
+        raise RuntimeError("菜单栏图标：没找到舌板")
+    Y0, Y1, Y1i = cav_y0 + d, cav_y1 - d, counter_top + d
+
+    prong = Bl - A + 1
+    counter = a - Bl - 1
+    outer = _u_solid(w, h, A, b, Y0, Y1, prong / 2.0, (b - A + 1) / 2.0)
+    tongue = _u_solid(w, h, Bl + 1, a - 1, Y0, Y1i, prong / 2.0, counter / 2.0)
+    hole = bytearray(1 if (outer[i] and not tongue[i]) else 0 for i in range(w * h))
+
+    # 5) 打洞
+    alpha = bytearray(1 if (solid[i] and not hole[i]) else 0 for i in range(w * h))
+    master = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    mp = master.load()
+    for i in range(w * h):
+        if alpha[i]:
+            mp[i % w, i // w] = (0, 0, 0, 255)
+    print("   [folder] 外轮廓 %dx%d  U: A=%d Bl=%d a=%d b=%d Y0=%d Y1=%d Y1i=%d"
+              % (w, h, A, Bl, a, b, Y0, Y1, Y1i))
+    return _tight_alpha(master)
+
+
 # ------------------------------------------------------------- 菜单栏图标
 def menu_master(kind: str = MENU_KIND, thicken: int = MENU_LINE_THICKEN,
                 fill_holes: bool = MENU_SOLID_FILL_HOLES) -> Image.Image:
@@ -184,6 +501,9 @@ def menu_master(kind: str = MENU_KIND, thicken: int = MENU_LINE_THICKEN,
         icon = Image.new("RGBA", (W, H), (0, 0, 0, 255))
         icon.putalpha(a)
         return _tight_alpha(icon)
+
+    if kind == "folder":
+        return folder_menu_master()
 
     if kind == "solid":
         im = Image.open(APP_SRC).convert("RGB")
@@ -284,14 +604,19 @@ def _thicken_arrow(alpha: Image.Image, radius: int) -> Image.Image:
 
 def render_menu_reps(master: Image.Image, base: int = MENU_BASE,
                      inset: float = MENU_INSET) -> list[Image.Image]:
-    """按内容高度 = base×(1-2×inset) 渲染 1x/2x/3x，画布固定 base 点的正方形。"""
+    """把内容等比内接到 base×(1-2×inset) 的正方形里，渲染 1x/2x/3x。
+
+    取"长短边都不超过包含盒"，而不是只按高度适配 —— 否则横宽的图形
+    （例如文件夹，宽高比 1.11）会横向撑满画布、跟相邻图标贴在一起。
+    竖长的图形（旧版磁铁母版宽高比 0.46）结果与按高度适配完全一致。
+    """
     iw, ih = master.size
     reps = []
     for scale in (1, 2, 3):
         pc = base * scale
-        ch = pc * (1 - 2 * inset)
-        cw = ch * iw / ih
-        cwi, chi = max(1, round(cw)), max(1, round(ch))
+        box = pc * (1 - 2 * inset)
+        k = box / float(max(iw, ih))
+        cwi, chi = max(1, round(iw * k)), max(1, round(ih * k))
         if cwi > 1 and chi > 1:
             small = _premul_resize(master, (cwi, chi))
         else:                       # 1x 下只有几个像素，用直接缩放避免过度模糊
@@ -332,7 +657,8 @@ def generate(menu_kind: str = MENU_KIND, thicken: int = MENU_LINE_THICKEN,
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="生成 115 秒转的图标资源")
-    ap.add_argument("--menu-kind", choices=("line", "solid"), default=MENU_KIND)
+    ap.add_argument("--menu-kind", choices=("folder", "line", "solid"),
+                    default=MENU_KIND)
     ap.add_argument("--thicken", type=int, default=MENU_LINE_THICKEN)
     ap.add_argument("--fill-holes", action="store_true", default=MENU_SOLID_FILL_HOLES)
     args = ap.parse_args(argv)
