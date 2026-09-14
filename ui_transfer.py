@@ -350,6 +350,18 @@ class _TransferPanel:
             pass
         tv.setDelegate_(self._bridge)
         scroll.setDocumentView_(tv)
+        # 【文本视图宽度必须对齐 clip，不能对齐 scroll 的 frame】这里踩过坑：
+        # scroll 的 frame 给的是 cw-2，但「系统设置里滚动条选『始终』」时，传统竖滚动条
+        # 会实占 15pt，真正可见的 clip 只有 cw-17 宽。而 tv 建在 cw-4 —— 比 clip 宽 13pt。
+        # 文档视图一旦比 clip 宽，clip 就具备了横向滚动能力；窗口上屏、输入框拿到焦点时
+        # AppKit 会把它滚到 x=13（实测 clip.bounds.x: 0 → 13），于是输入的文字整行左移
+        # 一个滚动量，和 placeholder 的文字左右错开 —— 看着就是「文字贴着最左边、跟引导语
+        # 没对齐」。把 tv 宽度对齐 clip 后，横向可滚动距离为 0，clip 再也滚不动。
+        # （滚动条在「滚动时显示」的系统上，滚动条是覆盖式的、不占宽度，本来就 ≤ clip，
+        #  所以这个 bug 只在传统滚动条下出现。tv 已设 NSViewWidthSizable，
+        #  起始宽度一致后，日后 clip 再变宽变窄它也会跟着走。）
+        clip = scroll.contentView()
+        tv.setFrameSize_((clip.frame().size.width, tv.frame().size.height))
         card.addSubview_(scroll)
         self._editor = tv
 
