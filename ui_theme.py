@@ -37,6 +37,7 @@ from AppKit import (
     NSImage,
     NSImageView,
     NSImageScaleProportionallyUpOrDown,
+    NSImageSymbolConfiguration,
     NSLayoutAttributeNotAnAttribute,
     NSLineBreakByTruncatingTail,
     NSMakeRect,
@@ -117,6 +118,53 @@ def make_section_title(text: str):
 _SYMBOL_CACHE: dict[tuple, NSImage | None] = {}
 
 
+def _fit_symbol(img, size: float):
+    """按符号自身的宽高比缩放，长边 = size。
+
+    必须按比例：SF Symbol 的天然尺寸大多不是正方形
+    （internaldrive 18×13、folder.fill 18×14、chevron.right 10×14）。
+    早先无条件 setSize_((size, size)) 会把它们强行拉成正方形，
+    表现就是「图标畸变」—— 面包屑根节点那个硬盘图标被纵向拉高 28%，
+    行尾箭头被横向拉宽 40%。
+    """
+    try:
+        w, h = img.size()
+        if w > 0 and h > 0:
+            if w >= h:
+                img.setSize_((size, size * h / w))
+            else:
+                img.setSize_((size * w / h, size))
+        else:
+            img.setSize_((size, size))
+    except Exception:  # noqa: BLE001
+        pass
+    return img
+
+
+def _colorize_symbol(img, color):
+    """给符号上色。
+
+    注意：`NSImage.imageWithTintColor:` 在本机 pyobjc/AppKit 绑定里【不存在】
+    （hasattr(NSImage, "imageWithTintColor_") is False），原先的写法被
+    try/except 静默吞掉 —— 所有传了颜色的图标其实一直是灰的。
+    可靠路径是 SymbolConfiguration 的 hierarchical color。
+    """
+    try:
+        cfg = NSImageSymbolConfiguration.configurationWithHierarchicalColor_(color)
+        out = img.imageWithSymbolConfiguration_(cfg)
+        if out is not None:
+            return out
+    except Exception:  # noqa: BLE001
+        pass
+    try:  # 退路：万一以后绑定补上了这个 API
+        out = img.imageWithTintColor_(color)
+        if out is not None:
+            return out
+    except Exception:  # noqa: BLE001
+        pass
+    return img
+
+
 def symbol(name: str, size: float = 16.0, color=None, scale=None):
     """SF Symbol 取图，带缓存。
 
@@ -129,30 +177,21 @@ def symbol(name: str, size: float = 16.0, color=None, scale=None):
 
     img = None
     try:
-        if scale is None:
-            img = NSImage.imageWithSystemSymbolName_accessibilityDescription_(name, None)
-        else:
+        img = NSImage.imageWithSystemSymbolName_accessibilityDescription_(name, None)
+        if img is not None and scale is not None:
             cfg = NSImageSymbolConfiguration.configurationWithPointSize_weight_scale_(
                 size, NSFontWeightRegular, scale
             )
-            img = NSImage.imageWithSystemSymbolName_variableValue_accessibilityDescription_(
-                name, 1.0, None
-            )
-            if img is not None:
-                img = img.imageWithSymbolConfiguration_(cfg)
+            configured = img.imageWithSymbolConfiguration_(cfg)
+            if configured is not None:
+                img = configured
     except Exception:  # noqa: BLE001
         img = None
 
     if img is not None:
-        try:
-            if color is not None:
-                img = img.imageWithTintColor_(color)
-        except Exception:  # noqa: BLE001
-            pass
-        try:
-            img.setSize_((size, size))
-        except Exception:  # noqa: BLE001
-            pass
+        if color is not None:
+            img = _colorize_symbol(img, color)
+        img = _fit_symbol(img, size)
 
     _SYMBOL_CACHE[key] = img
     return img

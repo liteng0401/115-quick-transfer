@@ -41,11 +41,16 @@ from AppKit import (
     NSAlert,
     NSAlertFirstButtonReturn,
     NSApplication,
+    NSBezierPath,
+    NSBitmapImageRep,
     NSBox,
     NSBoxCustom,
     NSCenterTextAlignment,
     NSColor,
+    NSDeviceRGBColorSpace,
     NSFont,
+    NSGraphicsContext,
+    NSImage,
     NSImageView,
     NSLineBreakByTruncatingTail,
     NSMakeRect,
@@ -109,6 +114,46 @@ def run_transfer_panel(engine: Q115Engine, clip: str = "",
 
 def _join(base: str, name: str) -> str:
     return ("/" + name) if base == "/" else base.rstrip("/") + "/" + name
+
+
+# NSPathControl 会把 item 的图片【强行拉伸填满】它的图标格，完全忽略 NSImage 的 size
+# （实测：不管把 image.size 设成 13×13、13×9.4 还是 26×9.4，画出来都是同一个 22×控件高 的方块）。
+# 所以给它的图必须先按「图标格」的比例画好、符号居中，拉伸才成为无操作；
+# 否则符号会被拉成一条 —— 面包屑根节点那个硬盘图标的畸变就是这么来的。
+_PATH_ICON_BOX_W = 22.0
+_PATH_ICON_BOX_H_FALLBACK = 26.0
+_PATH_ICON_GLYPH_W = 13.0
+
+
+def _breadcrumb_root_icon(box_h: float):
+    """生成面包屑根节点图标：按图标格比例预拉伸，符号保持自身宽高比居中。"""
+    sym = symbol("internaldrive", _PATH_ICON_GLYPH_W, NSColor.secondaryLabelColor())
+    if sym is None:
+        return None
+    box_w = _PATH_ICON_BOX_W
+    if not (8.0 <= float(box_h or 0.0) <= 60.0):
+        box_h = _PATH_ICON_BOX_H_FALLBACK
+    gw, gh = sym.size()
+    if gw <= 0 or gh <= 0:
+        return None
+    img = NSImage.alloc().initWithSize_((box_w, box_h))
+    for scale in (1, 2):
+        px, py = int(round(box_w * scale)), int(round(box_h * scale))
+        rep = NSBitmapImageRep.alloc().initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel_(
+            None, px, py, 8, 4, True, False, NSDeviceRGBColorSpace, 0, 0)
+        rep.setSize_((px, py))
+        ctx = NSGraphicsContext.graphicsContextWithBitmapImageRep_(rep)
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.setCurrentContext_(ctx)
+        NSColor.clearColor().set()
+        NSBezierPath.fillRect_(NSMakeRect(0, 0, px, py))
+        sym.drawInRect_(NSMakeRect(
+            (box_w - gw) / 2.0 * scale, (box_h - gh) / 2.0 * scale,
+            gw * scale, gh * scale))
+        NSGraphicsContext.restoreGraphicsState()
+        rep.setSize_((box_w, box_h))
+        img.addRepresentation_(rep)
+    return img
 
 
 class _TransferPanel:
@@ -524,11 +569,16 @@ class _TransferPanel:
         if pc is None:
             return
         items = []
+        box_h = 0.0
+        try:
+            box_h = pc.frame().size.height or pc.bounds().size.height or 0.0
+        except Exception:  # noqa: BLE001
+            box_h = 0.0
         for i, (name, _cid) in enumerate(self._crumbs):
             item = NSPathControlItem.alloc().init()
             item.setTitle_("115" if i == 0 else (name or "/"))
             if i == 0:
-                img = symbol("internaldrive", 13.0, NSColor.secondaryLabelColor())
+                img = _breadcrumb_root_icon(box_h)
                 if img is not None:
                     item.setImage_(img)
             items.append(item)

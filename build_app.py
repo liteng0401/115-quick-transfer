@@ -23,7 +23,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 APP_NAME = "115QuickTransfer"
-APP_VERSION = "1.4"          # 发布版本号：改这里，Info.plist 与 zip 名一起跟着变
+APP_VERSION = "1.4.1"        # 发布版本号：改这里，Info.plist 与 zip 名一起跟着变
 MIN_MACOS = "12.0"          # 最低系统版本
 DIST_APP = HERE / "dist" / f"{APP_NAME}.app"
 
@@ -65,11 +65,19 @@ def _render_symbol_icon(symbol_name: str, size: int, out: Path) -> bool:
 
     NSColor.clearColor().set()
     NSBezierPath.fillRect_(NSMakeRect(0, 0, size, size))
-    # 让符号占满画布 85%，留出一点边距，视觉上和系统菜单栏图标对齐
+    # 让符号占满画布 85%，留出一点边距，视觉上和系统菜单栏图标对齐。
+    # 按符号自身宽高比居中绘制 —— 方形 rect 会把非正方形符号拉变形。
     inset = size * 0.075
-    rect = NSMakeRect(inset, inset, size - inset * 2, size - inset * 2)
-    img.setSize_((rect.size.width, rect.size.height))
-    img.drawInRect_(rect)
+    box = size - inset * 2
+    sw, sh = img.size()
+    if sw > 0 and sh > 0:
+        if sw >= sh:
+            dw, dh = box, box * sh / sw
+        else:
+            dw, dh = box * sw / sh, box
+    else:
+        dw = dh = box
+    img.drawInRect_(NSMakeRect((size - dw) / 2.0, (size - dh) / 2.0, dw, dh))
 
     NSGraphicsContext.restoreGraphicsState()
 

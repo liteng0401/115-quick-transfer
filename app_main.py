@@ -137,10 +137,20 @@ def _make_status_icon(symbol: str = "icloud.and.arrow.down.fill", base: int = 18
         NSGraphicsContext.setCurrentContext_(ctx)
         NSColor.clearColor().set()
         NSBezierPath.fillRect_(NSMakeRect(0, 0, px, px))
+        # 按符号自身宽高比居中绘制（长边 = 画布 85%）。
+        # 不能把方形 rect 硬塞给 drawInRect_：那会把 18×17 的云朵图标纵向拉长，
+        # 菜单栏上看起来就是一个被捏过形状的畸变图标。
         inset = px * 0.075
-        rect = NSMakeRect(inset, inset, px - inset * 2, px - inset * 2)
-        sym.setSize_((rect.size.width, rect.size.height))
-        sym.drawInRect_(rect)
+        box = px - inset * 2
+        sw, sh = sym.size()
+        if sw > 0 and sh > 0:
+            if sw >= sh:
+                dw, dh = box, box * sh / sw
+            else:
+                dw, dh = box * sw / sh, box
+        else:
+            dw = dh = box
+        sym.drawInRect_(NSMakeRect((px - dw) / 2.0, (px - dh) / 2.0, dw, dh))
         NSGraphicsContext.restoreGraphicsState()
         # 再告诉 AppKit 这张位图对应 base×base 点（scale=1/2/3）
         rep.setSize_((base, base))
