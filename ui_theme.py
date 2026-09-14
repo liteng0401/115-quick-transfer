@@ -325,18 +325,35 @@ def make_flat_button(title: str, symbol_name: str | None = None, size: float = 1
 # 毛玻璃窗口
 # ---------------------------------------------------------------------------
 
-def make_window(width: float, height: float, title: str = ""):
+def make_window(width: float, height: float, title: str = "",
+                resizable: bool = False):
     """一张 macOS 原生观感的窗口：透明标题栏 + 全屏内容视图 + 毛玻璃底。
 
     这样做出来标题不像贴在窗框上的一条，内容可以一直铺到窗口边缘，
     和系统「关于本机」「存储空间」这类面板是同一套做法。
+
+    resizable 默认 False —— 这一族窗口都是固定版式的模态面板，尺寸一变
+    整个布局就散架，理由见下面的注释。
     """
+    # 【为什么默认不可缩放 —— 这里踩过坑】
+    # 之前 mask 里带着 NSResizableWindowMask，于是双击标题栏会走系统 zoom：
+    # 640x700 的小面板被直接撑到整屏（实测 1920x1050）。而 place() 是绝对
+    # 坐标 —— 只在建窗那一刻按固定高度算一次 y（parent_h - top - h），窗口
+    # 变大后子视图仍停在按旧高度算出的位置：标题、输入卡片、目录列表、底部
+    # 按钮会各自「漂」开，整块界面散架（边上留一大片空的毛玻璃）。
+    # 去掉这个 mask 后：双击标题栏不再放大，绿色按钮自动变灰（固定尺寸面板
+    # 的原生表现），拖边框也不生效。
+    # 别改用 contentMinSize/contentMaxSize 去「锁」尺寸 —— 那样绿色按钮还是
+    # 亮的、点下去毫无反应，等于摆了个会骗人的假按钮。
+    # 另外别担心出场动画：style mask 只约束「用户拖拽 / zoom」，程序自己
+    # setFrame: 照常生效，present_window / dismiss_window 的缩放不受影响。
     mask = (
         NSTitledWindowMask
         | NSClosableWindowMask
         | NSFullSizeContentViewWindowMask
-        | NSResizableWindowMask
     )
+    if resizable:
+        mask |= NSResizableWindowMask
     win = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
         NSMakeRect(0, 0, width, height), mask, NSBackingStoreBuffered, False
     )
