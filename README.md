@@ -1,5 +1,10 @@
 # 115 秒转 · 115QuickTransfer
 
+[![Release](https://img.shields.io/github/v/release/liteng0401/115-quick-transfer?label=release&color=brightgreen)](https://github.com/liteng0401/115-quick-transfer/releases/latest)
+[![License](https://img.shields.io/github/license/liteng0401/115-quick-transfer?color=blue)](LICENSE)
+![Platform](https://img.shields.io/badge/platform-macOS%2012%2B%20%C2%B7%20Apple%20Silicon-black)
+[![Python](https://img.shields.io/badge/python-3.13-3776AB)](https://www.python.org/)
+
 > 常驻 macOS 菜单栏的小工具：复制磁力 / ed2k / 直链，点一下就提交为 115 网盘「云下载」任务，
 > 并自动落到你指定的文件夹。**不用开浏览器，不用登录网页版，不用手点「云下载」。**
 
