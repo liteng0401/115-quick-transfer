@@ -113,6 +113,19 @@ APP_VERSION = _read_app_version()
 
 
 # ---------------------------------------------------------------------------
+# 菜单文案（单一来源，别在多处手写同一个字符串）
+# ---------------------------------------------------------------------------
+# 关于「…」的用法，定成一条规则，别再混着来：
+#   · 【静态的动作型标题】不带尾部省略号。它会被误读成"后面还有内容 / 被截断了"，
+#     而菜单内容本来就是完整的 —— 用户 2026-09-14 就是这么报的（「登录 / 切换账号
+#     （手机扫码）…」，那个「…」是我们自己写进字符串的，不是系统截断）。
+#   · 【进行中的状态文案】保留省略号，它表达的是"还在继续"，
+#     如「正在获取二维码…」「正在提交云下载任务…」「（等待中…）」。
+LOGIN_LABEL = "登录 / 切换账号（手机扫码）"
+LOGIN_WAITING_LABEL = "等待手机扫码确认…"   # 进行中 → 保留省略号
+
+
+# ---------------------------------------------------------------------------
 # 工具函数
 # ---------------------------------------------------------------------------
 
@@ -346,9 +359,9 @@ class Q115App(rumps.App):
 
         self.mi_transfer = rumps.MenuItem("转存剪贴板里的链接", callback=self.on_transfer)
         self.mi_status = rumps.MenuItem("状态：检查中", callback=self.on_refresh_status)
-        self.mi_login = rumps.MenuItem("登录 / 切换账号（手机扫码）…", callback=self.on_login)
-        self.mi_about = rumps.MenuItem(
-            f"关于 {APP_DISPLAY} v{APP_VERSION}", callback=self.on_about)
+        self.mi_login = rumps.MenuItem(LOGIN_LABEL, callback=self.on_login)
+        # 「关于」项不带版本号 —— 菜单栏位置窄，版本号放在点开后的弹窗里显示。
+        self.mi_about = rumps.MenuItem(f"关于 {APP_DISPLAY}", callback=self.on_about)
         self.mi_quit = rumps.MenuItem("退出 " + APP_DISPLAY, callback=self.on_quit)
 
         super().__init__(
@@ -476,7 +489,7 @@ class Q115App(rumps.App):
         self._login_waiting = True
         self._login_result = None
         self.mi_status.title = "状态：请用手机 115 扫码（等待中…）"
-        self.mi_login.title = "等待手机扫码确认…"
+        self.mi_login.title = LOGIN_WAITING_LABEL
         self.ensure_poll_timer()
 
         try:
@@ -591,7 +604,7 @@ class Q115App(rumps.App):
             return
         # expired / canceled
         self._login_waiting = False
-        self.mi_login.title = "登录 / 切换账号（手机扫码）…"
+        self.mi_login.title = LOGIN_LABEL
         self.update_ui()
         if status == "expired":
             if win is not None:
@@ -621,7 +634,7 @@ class Q115App(rumps.App):
 
     def _on_login_finished(self, err: str, name: str) -> None:
         win = self._login_win
-        self.mi_login.title = "登录 / 切换账号（手机扫码）…"
+        self.mi_login.title = LOGIN_LABEL
         if err:
             self.update_ui()
             # 失败原因在登录窗口里就地说清楚，不再额外弹一个 Alert
@@ -644,7 +657,7 @@ class Q115App(rumps.App):
         # 丢掉在途的轮询结果，否则关窗后还会冒一条「二维码已过期」通知
         self._login_result = None
         self._login_busy = False
-        self.mi_login.title = "登录 / 切换账号（手机扫码）…"
+        self.mi_login.title = LOGIN_LABEL
         self.update_ui()
 
     def on_logout(self) -> None:
@@ -788,7 +801,7 @@ class Q115App(rumps.App):
         if not self.engine.is_logged_in():
             rumps.alert(
                 title="尚未登录",
-                message="请先点击「登录 / 切换账号（手机扫码）…」，用手机 115 扫码登录。",
+                message=f"请先点击「{LOGIN_LABEL}」，用手机 115 扫码登录。",
                 ok="知道了",
             )
             return
