@@ -1,0 +1,7 @@
+p115client
+rumps==0.4.0
+pyobjc-framework-Cocoa
+requests
+qrcode
+pillow
+pyinstaller
