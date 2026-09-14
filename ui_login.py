@@ -62,6 +62,7 @@ class LoginWindow:
         self._spin = None
         self._btn = None
         self._on_retry = None
+        self._on_close = None
         self._done = False
 
     # ---------------- 显示 ----------------
@@ -77,6 +78,10 @@ class LoginWindow:
             NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
         except Exception:  # noqa: BLE001
             pass
+
+    def set_on_close(self, callback) -> None:
+        """窗口被用户手动关闭时由 close() 回调一次，便于外部清理引用与状态。"""
+        self._on_close = callback
 
     def set_qr(self, path: str) -> None:
         """换一张新二维码（原窗口复用，不闪不重建）。"""
@@ -244,10 +249,17 @@ class LoginWindow:
             return
         win = self._win
         self._win = None      # 先标记已关，避免动画期间被重复触发
-        try:
-            NSApplication.sharedApplication().stopModal()
-        except Exception:  # noqa: BLE001
-            pass
+
+        # 注意：本窗口是非模态的，绝不能调用 stopModal()。
+        # 之前误调 stopModal 会扰乱 NSApplication 的模态状态，导致关闭后
+        # 菜单栏点击无响应、甚至无法退出。
+        on_close = getattr(self, "_on_close", None)
+        self._on_close = None
+        if on_close is not None:
+            try:
+                on_close()
+            except Exception:  # noqa: BLE001
+                pass
 
         def done() -> None:
             try:

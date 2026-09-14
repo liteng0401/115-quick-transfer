@@ -337,6 +337,7 @@ class Q115App(rumps.App):
         try:
             if self._login_win is None:
                 self._login_win = LoginWindow(state.qr_png)
+                self._login_win.set_on_close(self._on_login_window_closed)
             if self._login_win.is_visible():
                 self._login_win.set_qr(state.qr_png)
             self._login_win.waiting()
@@ -412,6 +413,13 @@ class Q115App(rumps.App):
                 win.fail("已取消登录")
             self._login_win = None
             notify(APP_DISPLAY, "已取消登录")
+
+    def _on_login_window_closed(self) -> None:
+        """用户手动关闭二维码窗口：立即清理引用、停止轮询、恢复菜单文案。"""
+        self._login_waiting = False
+        self._login_win = None
+        self.mi_login.title = "登录 / 切换账号（手机扫码）…"
+        self.update_ui()
 
     def on_logout(self) -> None:
         self.engine.logout()

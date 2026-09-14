@@ -348,6 +348,16 @@ class _TransferPanel:
             tv.setTextContainerInset_((7.0, 7.0))
         except Exception:  # noqa: BLE001
             pass
+        # placeholder 必须在 setDelegate_ 之前创建并挂到 self。
+        # 原因：tv.setDelegate_ 后 AppKit 会立即触发 textViewDidChangeSelection:，
+        # 而 _TransferBridge 里这个回调会走到 do_text_changed() → _refresh_count()，
+        # 后者需要 self._ph_label。若此时 ph 还没创建，就会报 AttributeError。
+        # （ph 可以先创建再 later 插到视图层级；setHidden_ 不依赖它已在层级里。）
+        ph = make_label("粘贴磁力 / ed2k / http 链接", 13.0, 0.0,
+                        NSColor.placeholderTextColor())
+        place(ph, 11, 8, 300, 18, card)
+        self._ph_label = ph
+
         tv.setDelegate_(self._bridge)
         scroll.setDocumentView_(tv)
         # 【文本视图宽度必须对齐 clip，不能对齐 scroll 的 frame】这里踩过坑：
@@ -373,9 +383,6 @@ class _TransferPanel:
             except Exception:  # noqa: BLE001
                 pass
 
-        ph = make_label("粘贴磁力 / ed2k / http 链接", 13.0, 0.0,
-                        NSColor.placeholderTextColor())
-        place(ph, 11, 8, 300, 18, card)
         # 【必须把 placeholder 压在滚动视图下层】这里踩过坑，两件事都由它决定：
         #   · 鼠标事件按子视图「从后往前」的顺序派发。放在上层时，这一带
         #     hitTest 返回的是这个标签而不是输入框 —— 点上去输入框拿不到焦点，
@@ -388,7 +395,6 @@ class _TransferPanel:
         # 真正承载子视图的是滚动视图的父层，直接对它排。
         holder = scroll.superview() or card
         holder.addSubview_positioned_relativeTo_(ph, NSWindowBelow, scroll)
-        self._ph_label = ph
         ph.setHidden_(bool(self._clip))
 
         cnt = make_label("", 12.0, 0.0, NSColor.secondaryLabelColor())
