@@ -79,6 +79,16 @@ class LoginWindow:
         except Exception:  # noqa: BLE001
             pass
 
+    def bring_to_front(self) -> None:
+        """把已经存在的窗口唤到前台。不重建、不动 on_retry（show 会覆盖它）。"""
+        if self._win is None:
+            return
+        try:
+            self._win.makeKeyAndOrderFront_(None)
+            NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+        except Exception:  # noqa: BLE001
+            pass
+
     def set_on_close(self, callback) -> None:
         """窗口被用户手动关闭时由 close() 回调一次，便于外部清理引用与状态。"""
         self._on_close = callback
@@ -180,15 +190,21 @@ class LoginWindow:
     # ---------------- 状态推进 ----------------
 
     def mark_scanned(self) -> None:
+        if self._win is None:
+            return
         self._set_status("已扫码，请在手机上确认",
                          NSColor.secondaryLabelColor(),
                          "hand.raised.fill", NSColor.systemBlueColor())
 
     def waiting(self) -> None:
+        if self._win is None:
+            return
         self._set_status("等待扫码…", NSColor.secondaryLabelColor(), None, None)
 
     def succeed(self, name: str = "") -> None:
         """成功：二维码整块换成对勾，1.1s 后自动收窗。"""
+        if self._win is None:
+            return
         self._done = True
         self._spin.stopAnimation_(None)
         self._spin.setHidden_(True)
@@ -226,6 +242,8 @@ class LoginWindow:
 
     def fail(self, reason: str) -> None:
         """失败/过期：原地给出原因和重试按钮，不消失、也不用回菜单栏重点。"""
+        if self._win is None:
+            return
         self._spin.stopAnimation_(None)
         self._spin.setHidden_(True)
         self._set_status(reason, NSColor.systemOrangeColor(),
@@ -275,6 +293,12 @@ class LoginWindow:
     # ---------------- 内部 ----------------
 
     def _set_status(self, text: str, color, icon_name, icon_color) -> None:
+        # 窗口尚未 _build()（或已销毁）时控件都还是 None。
+        # 「刷新状态文案」这种小事绝不能把登录主流程带崩 —— 实测踩过：
+        # 调用方在 show() 之前调 waiting()，这里直接 AttributeError，
+        # 于是整个登录窗口没建出来、却已经把轮询跑起来了（卡死的源头）。
+        if self._status_text is None or self._status_icon is None or self._spin is None:
+            return
         self._status_text.setStringValue_(text)
         self._status_text.setTextColor_(color)
         if icon_name is None:

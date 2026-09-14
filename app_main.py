@@ -74,6 +74,45 @@ ICON_FILE = ASSET_DIR / "iconTemplate.png"
 
 
 # ---------------------------------------------------------------------------
+# 版本号（单一来源：build_app.py 的 APP_VERSION）
+# ---------------------------------------------------------------------------
+
+def _read_app_version() -> str:
+    """取运行时版本号，供菜单「关于」项显示。
+
+    版本号唯一的定义处是 build_app.py 的 APP_VERSION。打包后该文件不在包里，
+    转而读 .app 自己 Info.plist 里的 CFBundleShortVersionString（打包时由同一个
+    APP_VERSION 写进去），保证两边永远一致。
+    """
+    # 1) 打包运行：读 .app/Contents/Info.plist
+    if getattr(sys, "frozen", False):
+        try:
+            import plistlib
+
+            plist = Path(sys.executable).resolve().parents[1] / "Info.plist"
+            with open(plist, "rb") as f:
+                v = plistlib.load(f).get("CFBundleShortVersionString")
+            if v:
+                return str(v)
+        except Exception:  # noqa: BLE001
+            pass
+    # 2) 源码运行：从 build_app.py 里抠常量（不 import，避免连带拉起打包依赖）
+    try:
+        import re
+
+        txt = (BASE_DIR / "build_app.py").read_text(encoding="utf-8")
+        m = re.search(r'^APP_VERSION\s*=\s*"([^"]+)"', txt, re.M)
+        if m:
+            return m.group(1)
+    except Exception:  # noqa: BLE001
+        pass
+    return "dev"
+
+
+APP_VERSION = _read_app_version()
+
+
+# ---------------------------------------------------------------------------
 # 工具函数
 # ---------------------------------------------------------------------------
 
@@ -253,6 +292,29 @@ def _install_main_menu(quit_target=None) -> None:
 
 
 # ---------------------------------------------------------------------------
+# 后台线程 → 主线程投递桥
+# ---------------------------------------------------------------------------
+
+from Foundation import NSObject as _NSObject  # noqa: E402
+
+
+class _MainBridge(_NSObject):
+    """后台线程干完活后，用它把「该刷新 UI 了」这件事投回主线程。
+
+    为什么必须这么做：AppKit 的一切视图/菜单操作都只能在主线程做，而网络请求
+    一旦放在主线程（以前就是这么写的）就会把 runloop 堵住 —— 菜单点不动、鼠标
+    转圈、连退出都点不了。所以改成「后台请求 + 回主线程刷 UI」。
+    用 performSelectorOnMainThread 而不是 NSTimer：它不依赖常驻定时器，
+    app.run() 之前调用也能排进主 runloop。
+    """
+
+    def uiRefresh_(self, _x=None) -> None:
+        o = getattr(self, "owner", None)
+        if o is not None:
+            o._apply_ui_refresh()
+
+
+# ---------------------------------------------------------------------------
 # 菜单栏应用
 # ---------------------------------------------------------------------------
 
@@ -265,9 +327,28 @@ class Q115App(rumps.App):
         self._notes: deque = deque()  # 后台线程产生、主线程定时器弹出的通知
         self._login_win: LoginWindow | None = None
 
+        # --- 后台任务的「在途 / 结果」槽位 ---
+        # 约定：只有主线程读写这些标志；后台线程只写结果并投递一次 uiRefresh:。
+        self._bridge = _MainBridge.alloc().init()
+        self._bridge.owner = self
+        self._qr_busy = False          # 正在后台取二维码
+        self._qr_state = None          # 后台取到的 _LoginState
+        self._qr_err = ""              # 后台取码失败原因
+        self._login_busy = False       # 正在后台轮询扫码状态
+        self._login_busy_since = 0.0   # 该次轮询开始时间（看门狗用）
+        self._login_result = None      # 后台轮询回来的状态字符串
+        self._finish_busy = False      # 正在后台完成登录（换 Cookie）
+        self._finish_done = False      # 后台登录完成，结果待主线程消费
+        self._finish_err = ""
+        self._finish_name = ""
+        self._auth_pending = False     # 正在后台查登录态
+        self._auth_result = (False, "")
+
         self.mi_transfer = rumps.MenuItem("转存剪贴板里的链接", callback=self.on_transfer)
         self.mi_status = rumps.MenuItem("状态：检查中", callback=self.on_refresh_status)
         self.mi_login = rumps.MenuItem("登录 / 切换账号（手机扫码）…", callback=self.on_login)
+        self.mi_about = rumps.MenuItem(
+            f"关于 {APP_DISPLAY} v{APP_VERSION}", callback=self.on_about)
         self.mi_quit = rumps.MenuItem("退出 " + APP_DISPLAY, callback=self.on_quit)
 
         super().__init__(
@@ -280,6 +361,7 @@ class Q115App(rumps.App):
                 self.mi_status,
                 self.mi_login,
                 None,
+                self.mi_about,
                 self.mi_quit,
             ],
             quit_button=None,
@@ -300,51 +382,123 @@ class Q115App(rumps.App):
             self._poll_timer.start()
 
     def update_ui(self) -> None:
-        ok, name = self.engine.account_info()
-        if ok:
-            label = "状态：已登录"
-            if name:
-                label += f"（{name}）"
-        else:
-            label = "状态：未登录"
-        self.mi_status.title = label
+        """刷新「状态」菜单文案。
+
+        校验登录态要打网络接口，绝不能放在主线程 —— 否则菜单打开、点击都会
+        连带卡住（以前就是这个毛病）。这里只派发后台任务，取到结果后由
+        _apply_ui_refresh() 在主线程写标题。
+        """
+        if self._auth_pending:
+            return
+        self._auth_pending = True
+        threading.Thread(target=self._auth_worker, daemon=True).start()
+
+    def _auth_worker(self) -> None:
+        try:
+            ok, name = self.engine.account_info()
+        except Exception:  # noqa: BLE001
+            ok, name = False, ""
+        self._auth_result = (ok, name)
+        self._notify_main()
+
+    def _apply_ui_refresh(self) -> None:
+        """在主线程把后台拿到的登录态写进菜单（见 _main_thread_bridge_cls）。"""
+        if self._auth_pending:
+            self._auth_pending = False
+            # 登录流程正在主导状态栏文案时不要抢（否则「正在获取二维码…」
+            # 会被上一次状态刷新覆盖成「未登录」）。
+            if self._qr_busy or self._login_waiting or self._finish_busy:
+                self._apply_pending_login_ui()
+            else:
+                ok, name = self._auth_result
+                label = "状态：已登录" if ok else "状态：未登录"
+                if ok and name:
+                    label += f"（{name}）"
+                self.mi_status.title = label
+        self._apply_pending_login_ui()
+
+    def _notify_main(self) -> None:
+        """从任意线程请求一次主线程刷新（线程安全）。"""
+        try:
+            self._bridge.performSelectorOnMainThread_withObject_waitUntilDone_(
+                "uiRefresh:", None, False)
+        except Exception:  # noqa: BLE001
+            pass
 
     # ---------- 登录 ----------
 
     def on_login(self, _sender=None) -> None:
         if self._login_waiting:
-            return
+            win = self._login_win
+            if win is not None and win.is_visible():
+                # 正在等待扫码且窗口还在：唤到前台就好，别重复取码。
+                win.bring_to_front()
+                return
+            # 窗口已经不在了（例如建窗失败走了「预览」回退，或者已被关掉）：
+            # 不能一直卡在「等待中」不放 —— 允许重新走一遍取码流程。
+            self._login_waiting = False
         self._start_qr()
 
     def _start_qr(self) -> None:
         """取一张新二维码并在原生登录窗口里显示。
 
         扫码过期/重试时也走这里 —— 窗口复用，只换图重画，不重新弹窗。
+
+        取码要连打两个网络接口（token + 二维码图），绝不能放在主线程：
+        以前点菜单「登录」会整界面顿住几秒，就是这么来的。这里只派发后台任务。
         """
+        if self._qr_busy or self._finish_busy:
+            return
         if self._login_waiting and self._login_win is None:
             return
+        self._qr_busy = True
+        self.mi_status.title = "状态：正在获取二维码…"
+        threading.Thread(target=self._qr_worker, daemon=True).start()
+
+    def _qr_worker(self) -> None:
         try:
-            state = self.engine.start_login()
+            self._qr_state = self.engine.start_login()
+            self._qr_err = ""
         except Q115Error as e:
-            rumps.alert(title="无法登录", message=str(e), ok="知道了")
+            self._qr_state, self._qr_err = None, str(e)
+        except Exception as e:  # noqa: BLE001
+            self._qr_state, self._qr_err = None, f"获取二维码失败：{e}"
+        self._notify_main()
+
+    def _on_qr_ready(self, state, err: str) -> None:
+        """主线程：拿到二维码后在原生窗口里展示。"""
+        if err or state is None:
+            self.update_ui()
+            rumps.alert(title="无法登录",
+                        message=err or "获取二维码失败，请稍后重试", ok="知道了")
             return
 
         self._login_waiting = True
+        self._login_result = None
         self.mi_status.title = "状态：请用手机 115 扫码（等待中…）"
         self.mi_login.title = "等待手机扫码确认…"
         self.ensure_poll_timer()
 
         try:
-            if self._login_win is None:
-                self._login_win = LoginWindow(state.qr_png)
-                self._login_win.set_on_close(self._on_login_window_closed)
-            if self._login_win.is_visible():
-                self._login_win.set_qr(state.qr_png)
-            self._login_win.waiting()
-            self._login_win.show(on_retry=self._start_qr)
+            win = self._login_win
+            if win is None:
+                win = LoginWindow(state.qr_png)
+                win.set_on_close(self._on_login_window_closed)
+                self._login_win = win
+            elif win.is_visible():
+                # 复用已有窗口：只换一张新二维码，不重建、不闪。
+                win.set_qr(state.qr_png)
+            # 【顺序不能反】show() 内部才执行 _build()，之前窗口只是空壳，
+            # 此时 _status_text 等控件还是 None。旧代码先调 waiting() 再 show()，
+            # 结果 waiting() 直接 AttributeError，登录窗口压根没建出来，却已经把
+            # _login_waiting 置为 True 并开始轮询 —— 用户看到的就是「点了登录没窗口、
+            # 然后整个软件卡住转圈」。所以务必 show 在前、waiting 在后。
+            win.show(on_retry=self._start_qr)
+            win.waiting()
         except Exception:  # noqa: BLE001
             # UI 层出问题不能把登录这个功能弄丢 —— 回退到用「预览」看图
             log("[login] 原生登录窗不可用，回退预览打开: " + traceback.format_exc())
+            self._login_win = None      # 丢掉这个没建起来的空壳，别让它挡住重试
             show_qr_image(state.qr_png)
         notify(APP_DISPLAY, "请用手机「115」App 扫码并确认")
 
@@ -360,12 +514,66 @@ class Q115App(rumps.App):
         except Exception:
             pass
 
+    def _apply_pending_login_ui(self) -> None:
+        """主线程：消费所有在途后台结果（取码 / 扫码状态 / 登录完成）。
+
+        与 _apply_ui_refresh 的分工：那个管「登录态文案」，这个管「登录流程」。
+        每次只处理一类，处理完由各分支自行决定要不要再刷一次 UI。
+        """
+        # ① 二维码取好了
+        if self._qr_state is not None or self._qr_err:
+            state, err = self._qr_state, self._qr_err
+            self._qr_state, self._qr_err = None, ""
+            self._qr_busy = False
+            self._on_qr_ready(state, err)
+
+        # ② 登录完成（换 Cookie 回来了）
+        if self._finish_done:
+            self._finish_done = False
+            err, name = self._finish_err, self._finish_name
+            self._finish_err, self._finish_name = "", ""
+            self._finish_busy = False
+            self._on_login_finished(err, name)
+
+        # ③ 扫码状态轮询结果
+        res = self._login_result
+        if res is not None:
+            self._login_result = None
+            if self._login_waiting:
+                self._handle_login_status(res)
+
     def _on_tick(self, _sender=None) -> None:
-        """主线程定时器：处理扫码结果轮询 + 弹出排队通知。"""
+        """主线程定时器：只做「起后台轮询 + 弹排队通知」。
+
+        【注意】这里绝对不能出现网络调用。以前 poll_login() 就直接写在这一行，
+        每 0.5 秒主线程被一次网络往返占住；网络稍慢 → 菜单点不动、鼠标转圈、
+        连退出都点不了（用户报的「关掉二维码窗口后就卡住」）。现在请求在后台线程，
+        这里只负责起任务和消费结果。
+        """
         self._drain_notes()
         if not self._login_waiting:
             return
-        status = self.engine.poll_login()
+        if self._login_busy:
+            # 看门狗：单次轮询超过 12s 视为请求挂死，解除占用允许重开，
+            # 否则后台线程若永久卡在网络里，扫码状态就再也不会更新了。
+            if time.time() - self._login_busy_since > 12.0:
+                self._login_busy = False
+            else:
+                return
+        self._login_busy = True
+        self._login_busy_since = time.time()
+        threading.Thread(target=self._poll_worker, daemon=True).start()
+
+    def _poll_worker(self) -> None:
+        try:
+            status = self.engine.poll_login()
+        except Exception:  # noqa: BLE001
+            status = "waiting"
+        self._login_result = status
+        self._login_busy = False
+        self._notify_main()
+
+    def _handle_login_status(self, status: str) -> None:
         win = self._login_win
         if status == "waiting":
             return
@@ -375,30 +583,11 @@ class Q115App(rumps.App):
                 win.mark_scanned()
             return
         if status == "ok":
+            # 换 Cookie 也是网络请求，同样丢给后台（见 _finish_worker）。
             self._login_waiting = False
-            try:
-                self.engine.finish_login()
-            except Q115Error as e:
-                self.mi_login.title = "登录 / 切换账号（手机扫码）…"
-                self.update_ui()
-                # 失败原因在登录窗口里就地说清楚，不再额外弹一个 Alert
-                if win is not None:
-                    win.fail(f"登录失败：{e}")
-                else:
-                    rumps.alert(title="登录失败", message=str(e), ok="知道了")
-                self._login_win = None
-                return
-            name = ""
-            try:
-                _, name = self.engine.account_info()
-            except Exception:  # noqa: BLE001
-                pass
-            self.mi_login.title = "登录 / 切换账号（手机扫码）…"
-            self.update_ui()
-            if win is not None:
-                win.succeed(name)   # 窗口自己对勾、1.1s 后自动关闭
-            self._login_win = None
-            notify(APP_DISPLAY, "登录成功，现在可以转存链接了")
+            self._finish_busy = True
+            self.mi_status.title = "状态：正在完成登录…"
+            threading.Thread(target=self._finish_worker, daemon=True).start()
             return
         # expired / canceled
         self._login_waiting = False
@@ -414,10 +603,47 @@ class Q115App(rumps.App):
             self._login_win = None
             notify(APP_DISPLAY, "已取消登录")
 
+    def _finish_worker(self) -> None:
+        try:
+            self.engine.finish_login()
+            name = ""
+            try:
+                _, name = self.engine.account_info()
+            except Exception:  # noqa: BLE001
+                pass
+            self._finish_err, self._finish_name = "", name
+        except Q115Error as e:
+            self._finish_err, self._finish_name = str(e), ""
+        except Exception as e:  # noqa: BLE001
+            self._finish_err, self._finish_name = f"登录确认失败（{e}）", ""
+        self._finish_done = True
+        self._notify_main()
+
+    def _on_login_finished(self, err: str, name: str) -> None:
+        win = self._login_win
+        self.mi_login.title = "登录 / 切换账号（手机扫码）…"
+        if err:
+            self.update_ui()
+            # 失败原因在登录窗口里就地说清楚，不再额外弹一个 Alert
+            if win is not None:
+                win.fail(f"登录失败：{err}")
+            else:
+                rumps.alert(title="登录失败", message=err, ok="知道了")
+            self._login_win = None
+            return
+        self.update_ui()
+        if win is not None:
+            win.succeed(name)   # 窗口自己对勾、1.1s 后自动关闭
+        self._login_win = None
+        notify(APP_DISPLAY, "登录成功，现在可以转存链接了")
+
     def _on_login_window_closed(self) -> None:
         """用户手动关闭二维码窗口：立即清理引用、停止轮询、恢复菜单文案。"""
         self._login_waiting = False
         self._login_win = None
+        # 丢掉在途的轮询结果，否则关窗后还会冒一条「二维码已过期」通知
+        self._login_result = None
+        self._login_busy = False
         self.mi_login.title = "登录 / 切换账号（手机扫码）…"
         self.update_ui()
 
@@ -675,6 +901,21 @@ class Q115App(rumps.App):
     def on_refresh_status(self, _sender=None) -> None:
         self.update_ui()
 
+    def on_about(self, _sender=None) -> None:
+        """「关于」菜单：显示当前运行的版本号。"""
+        try:
+            rumps.alert(
+                title=f"{APP_DISPLAY}  v{APP_VERSION}",
+                message=(
+                    f"版本：{APP_VERSION}\n\n"
+                    "把磁力 / ed2k / http 链接直接交给 115 离线下载的菜单栏小工具。\n"
+                    "github.com/liteng0401/115-quick-transfer"
+                ),
+                ok="好的",
+            )
+        except Exception:  # noqa: BLE001
+            log("[about] 弹窗失败: " + traceback.format_exc())
+
     def menuQuit_(self, _sender=None) -> None:
         """主菜单「退出 115 秒转」/ Cmd+Q 的入口。
 
@@ -711,10 +952,11 @@ class Q115App(rumps.App):
 
 def main() -> None:
     app = Q115App()
-    # 启动时只同步一次登录状态（登录态有 45s 缓存，之后不重复请求）
+    # 刷新一次登录状态。注意 update_ui() 现在只派发后台任务，不阻塞启动 ——
+    # 以前这里是同步网络请求，网络不好时菜单栏图标要等好几秒才出现。
     try:
         app.update_ui()
-        log("[app] 启动完成：登录状态已刷新")
+        log("[app] 启动完成：登录状态刷新已派发")
     except Exception:
         log("[app] 启动刷新异常:\n" + traceback.format_exc())
     app.run()
