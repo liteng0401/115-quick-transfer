@@ -219,6 +219,24 @@ class _TransferPanel:
         self._bridge = None
         self._count_msg = ""      # 上一次的计数文案，用来判断要不要闪一下
 
+        # 【所有会被 AppKit 代理回调访问到的视图属性，必须在这里预置为 None】
+        # 这里踩过两次同一个坑：
+        #   ① v1.4.7 的 `_ph_label`；
+        #   ② v1.4.9 的 `_count_label`（剪贴板里有链接时必崩）。
+        # 成因：_build() 是「边建边赋值」的，而注册代理（setDelegate_）或往
+        # NSTextView 里塞文本（setString_）都会让 AppKit **当场**回调
+        # textViewDidChangeSelection: / textDidChange: → do_text_changed()
+        # → _refresh_count()。此时若某个控件还没建到，就会
+        # `AttributeError: '_TransferPanel' object has no attribute '_xxx'`，
+        # 表现为「点转存就弹『无法打开窗口』」，而且只在特定条件下复现
+        # （剪贴板空时 setString_ 不触发回调，所以看着像随机 bug）。
+        # 统一在构造函数里预置，再给消费端加空值守卫，才是治本 —— 别再逐个补了。
+        self._editor = None
+        self._ph_label = None
+        self._count_label = None
+        self._focus_ring = None
+        self._btn_ok = None
+
         # 目录导航异步化：主线程只更新 UI，网络请求全部放到后台线程
         self._nav_busy = False
         self._load_ticket = 0
@@ -350,8 +368,10 @@ class _TransferPanel:
             pass
         # placeholder 必须在 setDelegate_ 之前创建并挂到 self。
         # 原因：tv.setDelegate_ 后 AppKit 会立即触发 textViewDidChangeSelection:，
-        # 而 _TransferBridge 里这个回调会走到 do_text_changed() → _refresh_count()，
-        # 后者需要 self._ph_label。若此时 ph 还没创建，就会报 AttributeError。
+        # 而 _TransferBridge 里这个回调会走到 do_text_changed() → _refresh_count()。
+        # 下面这几行只是「让 placeholder 尽早存在」的顺手优化；真正兜底的是
+        # __init__ 里把 _ph_label/_count_label 预置为 None + _refresh_count 开头的
+        # 空值守卫 —— 仅靠调换创建顺序修不干净（v1.4.9 的 _count_label 就是这么漏的）。
         # （ph 可以先创建再 later 插到视图层级；setHidden_ 不依赖它已在层级里。）
         ph = make_label("粘贴磁力 / ed2k / http 链接", 13.0, 0.0,
                         NSColor.placeholderTextColor())
@@ -672,6 +692,8 @@ class _TransferPanel:
     # ---------------- 链接 / 计数 ----------------
 
     def _editor_text(self) -> str:
+        if self._editor is None:
+            return ""
         try:
             return self._editor.string() or ""
         except Exception:  # noqa: BLE001
@@ -681,6 +703,11 @@ class _TransferPanel:
         return extract_links(self._editor_text())
 
     def _refresh_count(self) -> None:
+        # 【守卫不可省】本方法会被代理回调在半成品视图上调用（见 __init__ 里的长注释）。
+        # 控件还没建好时直接返回：反正 _build() 末尾会把它们建齐并补调一次，
+        # 那时再算也来得及，中间态不必刷。
+        if self._ph_label is None or self._count_label is None:
+            return
         text = self._editor_text()
         self._ph_label.setHidden_(bool(text.strip()))
         links = self._links_now()
