@@ -87,13 +87,18 @@ python3 -m venv .venv
 图标要换成别的，只改 `assets/src/` 里的原图后重新打包即可：
 
 - `app-icon.png` —— 应用图标原图（方形、建议 1024px）。
-- `menu-icon-folder.png` —— 菜单栏图标原图（浅色文件夹 + U 形镂空，当前默认）。
+- `menu-icon-magnet.png` —— 菜单栏图标原图（深底 + 白色马蹄形磁铁，当前默认）。
+  它是**纯二级位图**（全图只有背景与图形两个灰度、零抗锯齿），
+  `make_icons.py` 会自动量出这两个电平并按中点二值化，直接得到精确到 1px 的形状；
+  抗锯齿交给后续缩放产生。换成同类「深底 + 浅色实心图形」的新图可直接用。
+- `menu-icon-folder.png` —— 备用：浅色文件夹 + U 形镂空。
   注意它是**没有 alpha 通道的 RGB 图**：「透明棋盘格」是画进像素的底纹，
   `make_icons.py` 会自己把图形从棋盘格里认出来（外轮廓用局部标准差判别、
-  U 形洞口用亮度梯度定边后做几何重建），所以换成同类底纹的新图也能直接用。
+  U 形洞口用亮度梯度定边后做几何重建）。
 - `menu-icon-line.png` —— 备用：纯黑线条 + 白底（笔画在 18pt 下会发灰，不推荐）。
 
-菜单栏取哪种图由 `make_icons.py` 顶部的 `MENU_KIND` 控制（`folder` / `solid` / `line`）。
+菜单栏取哪种图由 `make_icons.py` 顶部的 `MENU_KIND` 控制
+（`magnet` / `folder` / `solid` / `line`）。
 
 ---
 

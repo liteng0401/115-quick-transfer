@@ -5,6 +5,7 @@ make_icons.py — 从 assets/src/ 里的原图生成两个图标资源
 
   输入：
     assets/src/app-icon.png       桌面图标原图（蓝色圆角方块 + 白色实心图形）
+    assets/src/menu-icon-magnet.png 菜单栏图标原图（深底 + 白色马蹄形磁铁，当前默认）
     assets/src/menu-icon-folder.png 菜单栏图标原图（浅色文件夹 + U 形镂空）
     assets/src/menu-icon-line.png 备用：黑线稿 + 白底（MENU_KIND="line" 时才用）
 
@@ -23,6 +24,12 @@ make_icons.py — 从 assets/src/ 里的原图生成两个图标资源
   · 桌面原图是"蓝色圆角方块铺满整张画布 + 白底四角"。macOS 原生图标是
     824/1024 的圆角方块居中、四周透明，因此这里缩放并留白，避免在访达里
     比别的 App 大一圈。
+  · 菜单栏原图分两类，对应两种取图方式：
+      (a) menu-icon-magnet.png —— **深底 + 白色实心图形**，且是纯二级位图
+          （本机实测整张图只有 50 / 255 两个取值，零抗锯齿）。这种图最好办：
+          按两级的中间值二值化即可拿到精确形状，抗锯齿交给后续预乘缩放自动产生。
+          不要对源图做模糊 —— 那只会让边缘变糊，不会变准。
+      (b) menu-icon-folder.png —— 见下面这段（假棋盘格，要几何重建）。
   · 菜单栏原图（menu-icon-folder.png）是**没有 alpha 通道的 RGB 图**，
     "透明棋盘格"是直接画进像素的。而且洞内叠了内阴影、把棋盘格压暗了。
     所以不能靠亮度阈值，也不能照抄像素边界（会发毛）——做法是：
@@ -32,7 +39,7 @@ make_icons.py — 从 assets/src/ 里的原图生成两个图标资源
 
 用法：
   python3 make_icons.py                      # 生成全部图标
-  python3 make_icons.py --menu-kind solid    # 指定菜单栏图标取图方式
+  python3 make_icons.py --menu-kind folder   # 指定菜单栏图标取图方式
 """
 
 from __future__ import annotations
@@ -49,6 +56,7 @@ HERE = Path(__file__).resolve().parent
 SRC_DIR = HERE / "assets" / "src"
 APP_SRC = SRC_DIR / "app-icon.png"
 MENU_FOLDER_SRC = SRC_DIR / "menu-icon-folder.png"
+MENU_MAGNET_SRC = SRC_DIR / "menu-icon-magnet.png"
 MENU_SRC = SRC_DIR / "menu-icon-line.png"
 
 # macOS 原生应用图标里，圆角方块占整张画布的比例（824 / 1024）
@@ -58,14 +66,15 @@ APP_BODY_RATIO = 824 / 1024
 MENU_BASE = 18
 MENU_INSET = 0.055          # 上下各留 5.5% ⇒ 内容高 ≈ 89% × 18pt ≈ 16pt
 
-# 菜单栏取图方式（都在本机真实菜单栏里 A/B 截图对比过）：
-#   "folder" —— 用 menu-icon-folder.png：浅色文件夹 + U 形镂空（当前默认）
+# 菜单栏取图方式：
+#   "magnet" —— 用 menu-icon-magnet.png：深底 + 白色马蹄形磁铁（当前默认）
+#   "folder" —— 用 menu-icon-folder.png：浅色文件夹 + U 形镂空
 #   "solid"  —— 用桌面图标里的白色实心形状（磁铁 + 下载箭头 + 115 文件夹）
 #   "line"   —— 用黑线稿，按 MENU_LINE_THICKEN 加粗（笔画太细，18pt 下会发灰）
 #
-# 2026-09-14 用户指定把菜单栏图标换成 menu-icon-folder.png，故默认改为 "folder"。
-# 另外两种没删，改这一个常量即可切回。
-MENU_KIND = "folder"
+# 2026-09-15 用户指定把菜单栏图标换成 menu-icon-magnet.png，故默认改为 "magnet"。
+# 另外三种没删，改这一个常量即可切回。
+MENU_KIND = "magnet"
 MENU_LINE_THICKEN = 12      # 线稿向两侧各膨胀的像素数（原图 1024 尺度）
 MENU_SOLID_FILL_HOLES = False  # True = 把镂空的「5」填实
 # 只给"下载箭头"那个连通块单独加粗（向两侧各 N 像素，原图 1024 尺度）。
@@ -75,18 +84,21 @@ MENU_SOLID_THICKEN_ARROW = 6
 
 
 # --------------------------------------------------------------------- 通用
-def _premul_resize(im: Image.Image, size: tuple[int, int]) -> Image.Image:
+def _premul_resize(im: Image.Image, size: tuple[int, int],
+                   resample: int = Image.LANCZOS) -> Image.Image:
     """预乘 alpha 后再缩放。
 
     直接对 RGBA 做 LANCZOS 缩放会把透明区域的黑色混进边缘像素，产生一圈
     灰/浅色光晕（图标边缘看起来"脏"）。预乘 → 缩放 → 反预乘可以消除。
+
+    resample 由 _resample_for() 按母版性质选（见那里的说明），别硬写 LANCZOS。
     """
     r, g, b, a = im.split()
     zero = Image.new("L", im.size, 0)
     pm = Image.merge("RGBA", (Image.composite(r, zero, a),
                               Image.composite(g, zero, a),
                               Image.composite(b, zero, a), a))
-    pm = pm.resize(size, Image.LANCZOS)
+    pm = pm.resize(size, resample)
     pr, pg, pb, pa = pm.split()
     adata = pa.tobytes()
     chans = []
@@ -96,6 +108,22 @@ def _premul_resize(im: Image.Image, size: tuple[int, int]) -> Image.Image:
             0 if adata[i] == 0 else min(255, round(cdata[i] * 255 / adata[i]))
             for i in range(len(cdata)))))
     return Image.merge("RGBA", (*chans, pa))
+
+
+def _resample_for(master: Image.Image) -> int:
+    """按母版性质挑下采样滤波器。
+
+    · 母版是**纯二值掩膜**（只有全透明 / 全不透明两种像素）时，面积平均
+      （BOX）就是精确的覆盖率真值 —— 源图没有需要保留的抗锯齿过渡带，
+      抗锯齿本来就该由这次下采样产生。
+      实测这里用 LANCZOS 会振铃：母版 307×338 缩到 2x（29×32）时，
+      在形状外的背景里留下 α 高达 29 的灰晕，等于给图标描了一圈淡淡的灰边。
+    · 母版本身带抗锯齿时（例如 "solid" 版是从应用图标里抠出来的实心形状），
+      过渡带就是有效信息，必须用 LANCZOS 保住细节。
+    """
+    h = master.getchannel("A").histogram()
+    return Image.BOX if h[0] + h[255] == master.width * master.height \
+        else Image.LANCZOS
 
 
 def _tight_alpha(icon: Image.Image, thresh: int = 110) -> Image.Image:
@@ -486,6 +514,44 @@ def folder_menu_master(src: Path = MENU_FOLDER_SRC) -> Image.Image:
     return _tight_alpha(master)
 
 
+# ------------------------------------- 深底 + 浅色实心图形（纯二级位图）
+#
+# 源图（menu-icon-magnet.png）本机实测：整张 1024² 只有 50 与 255 两个取值，
+# 零抗锯齿、零噪点。所以形状边界可以精确到 1px —— 直接按两级中点二值化。
+# 反过来说：**不要在这里加模糊/羽化去"改善边缘"**，源图没有需要恢复的过渡带，
+# 人为模糊只会让边缘偏移；抗锯齿应当由后续的预乘缩放（面积平均）产生。
+_FLAT_SPLIT = 60        # 亮度差低于此值不当成"两级图"，直接报错提示走别的取图方式
+
+
+def flat_bg_menu_master(src: Path = MENU_MAGNET_SRC) -> Image.Image:
+    """深底 + 浅色实心图形 → 模板图母版。
+
+    背景/前景两个电平靠直方图**自动量测**（众数 = 背景，显著亮电平 = 前景），
+    阈值取两者中点。源图换成别的深浅配色也能直接用，不必改常量。
+    """
+    im = Image.open(src).convert("L")
+    w, h = im.size
+    data = im.tobytes()
+
+    hist = [0] * 256
+    for v in data:
+        hist[v] += 1
+    bg = max(range(256), key=lambda v: hist[v])
+    cand = [v for v in range(256) if v > bg + _FLAT_SPLIT and hist[v]]
+    if not cand:
+        raise ValueError(
+            f"{src.name} 看起来不是「深底 + 浅色实心图形」的两级图"
+            f"（背景电平 {bg} 之上没有显著亮点），请改用 MENU_KIND='folder'/'solid'。")
+    fg = max(cand, key=lambda v: hist[v])
+    thr = (bg + fg) / 2.0
+
+    a = Image.frombytes("L", (w, h),
+                        bytes(255 if v > thr else 0 for v in data))
+    icon = Image.new("RGBA", (w, h), (0, 0, 0, 255))
+    icon.putalpha(a)
+    return _tight_alpha(icon)
+
+
 # ------------------------------------------------------------- 菜单栏图标
 def menu_master(kind: str = MENU_KIND, thicken: int = MENU_LINE_THICKEN,
                 fill_holes: bool = MENU_SOLID_FILL_HOLES) -> Image.Image:
@@ -501,6 +567,9 @@ def menu_master(kind: str = MENU_KIND, thicken: int = MENU_LINE_THICKEN,
         icon = Image.new("RGBA", (W, H), (0, 0, 0, 255))
         icon.putalpha(a)
         return _tight_alpha(icon)
+
+    if kind == "magnet":
+        return flat_bg_menu_master()
 
     if kind == "folder":
         return folder_menu_master()
@@ -609,8 +678,11 @@ def render_menu_reps(master: Image.Image, base: int = MENU_BASE,
     取"长短边都不超过包含盒"，而不是只按高度适配 —— 否则横宽的图形
     （例如文件夹，宽高比 1.11）会横向撑满画布、跟相邻图标贴在一起。
     竖长的图形（旧版磁铁母版宽高比 0.46）结果与按高度适配完全一致。
+
+    滤波器由 _resample_for() 按母版是不是二值掩膜决定。
     """
     iw, ih = master.size
+    resp = _resample_for(master)
     reps = []
     for scale in (1, 2, 3):
         pc = base * scale
@@ -618,9 +690,9 @@ def render_menu_reps(master: Image.Image, base: int = MENU_BASE,
         k = box / float(max(iw, ih))
         cwi, chi = max(1, round(iw * k)), max(1, round(ih * k))
         if cwi > 1 and chi > 1:
-            small = _premul_resize(master, (cwi, chi))
+            small = _premul_resize(master, (cwi, chi), resp)
         else:                       # 1x 下只有几个像素，用直接缩放避免过度模糊
-            small = master.resize((max(1, cwi), max(1, chi)), Image.LANCZOS)
+            small = master.resize((max(1, cwi), max(1, chi)), resp)
         cv = Image.new("RGBA", (pc, pc), (0, 0, 0, 0))
         cv.paste(small, ((pc - small.width) // 2, (pc - small.height) // 2), small)
         reps.append(cv)
@@ -657,7 +729,8 @@ def generate(menu_kind: str = MENU_KIND, thicken: int = MENU_LINE_THICKEN,
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="生成 115 秒转的图标资源")
-    ap.add_argument("--menu-kind", choices=("folder", "line", "solid"),
+    ap.add_argument("--menu-kind",
+                    choices=("magnet", "folder", "line", "solid"),
                     default=MENU_KIND)
     ap.add_argument("--thicken", type=int, default=MENU_LINE_THICKEN)
     ap.add_argument("--fill-holes", action="store_true", default=MENU_SOLID_FILL_HOLES)
