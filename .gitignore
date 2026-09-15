@@ -52,3 +52,6 @@ cookies.txt
 
 # 图标生成的中间产物（.icns 才是要提交的成品）
 assets/AppIcon.iconset/
+
+# UI 对齐用的本地可视化工作台（开发辅助，不随仓库分发）
+workbench.html

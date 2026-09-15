@@ -38,8 +38,10 @@ from AppKit import (
     NSImageView,
     NSImageScaleProportionallyUpOrDown,
     NSImageSymbolConfiguration,
+    NSClipView,
     NSLayoutAttributeNotAnAttribute,
     NSLineBreakByTruncatingTail,
+    NSMakePoint,
     NSMakeRect,
     NSNoTitle,
     NSProgressIndicator,
@@ -228,6 +230,22 @@ def make_card(corner: float = R_CARD):
     return box
 
 
+class _ClampedClipView(NSClipView):
+    """横向偏移物理钳制为 0 的 clip view。
+
+    无论文档视图比可视区宽多少（竖向滚动条出现会压窄可视区），
+    bounds.origin.x 恒为 0 —— 横向弹性手势产生的偏移在最终落点处被强制归零，
+    从机制上杜绝「左右滑完回不到原位 / 内容被遮挡」。"""
+
+    def setBoundsOrigin_(self, origin):
+        try:
+            if origin.x != 0:
+                origin = NSMakePoint(0, origin.y)
+        except Exception:  # noqa: BLE001
+            pass
+        NSClipView.setBoundsOrigin_(self, origin)
+
+
 def make_scroll(frame=None, draws_bg: bool = False, corner: float = 0.0):
     sv = NSScrollView.alloc().initWithFrame_(frame or NSMakeRect(0, 0, 10, 10))
     sv.setHasVerticalScroller_(True)
@@ -236,6 +254,13 @@ def make_scroll(frame=None, draws_bg: bool = False, corner: float = 0.0):
     sv.setDrawsBackground_(draws_bg)
     if draws_bg:
         sv.setBackgroundColor_(NSColor.clearColor())
+    # 换装钳制型 clip view（frame 保持与默认一致）
+    try:
+        cv = _ClampedClipView.alloc().initWithFrame_(sv.contentView().frame())
+        cv.setDrawsBackground_(False)  # 默认 clip view 会画白底，必须关掉
+        sv.setContentView_(cv)
+    except Exception:  # noqa: BLE001
+        pass  # 旧系统兜底：退回默认 clip view
     return sv
 
 

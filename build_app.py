@@ -23,7 +23,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 APP_NAME = "115QuickTransfer"
-APP_VERSION = "1.4.13"        # 发布版本号：改这里，Info.plist 与 zip 名一起跟着变
+APP_VERSION = "2.0.0"          # 发布版本号：改这里，Info.plist 与 zip 名一起跟着变
 MIN_MACOS = "12.0"          # 最低系统版本
 DIST_APP = HERE / "dist" / f"{APP_NAME}.app"
 
@@ -74,6 +74,7 @@ def main() -> int:
         "--hidden-import", "ui_theme",
         "--hidden-import", "ui_transfer",
         "--hidden-import", "ui_login",
+        "--hidden-import", "ui_share",
         "--hidden-import", "dir_picker",
         "--collect-submodules", "p115client.tool.clouddownload",
         "--collect-submodules", "p115client.tool.iterdir",

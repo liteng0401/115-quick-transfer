@@ -28,6 +28,7 @@ from typing import Any, Iterable, Optional
 try:
     import requests
     from p115client import P115Client
+    from p115client.fs import P115ShareFileSystem
 except Exception:  # pragma: no cover - 打包后依赖必然存在
     raise
 
@@ -66,6 +67,24 @@ class Q115LoginCanceled(Q115Error):
 
 class Q115LoginExpired(Q115Error):
     pass
+
+
+def _retry_transient(fn, attempts: int = 3, delay: float = 1.5):
+    """对 DNS 解析失败 / 连接失败等瞬时网络错误自动重试；业务错误不重试。"""
+    import requests.exceptions as _rxc  # noqa: PLC0415
+
+    last = None
+    for i in range(attempts):
+        try:
+            return fn()
+        except _rxc.RequestException as e:
+            # 只重试连接类错误（ConnectionError 含 NameResolutionError/超时），
+            # HTTP 4xx/5xx 状态错误不在此列（requests 仅在 raise_for_status 后才是 HTTPError）
+            last = e
+            if i + 1 < attempts:
+                log(f"[net] 瞬时网络错误（第 {i + 1} 次），{delay}s 后重试: {e}")
+                time.sleep(delay)
+    raise last
 
 
 def _support_dir() -> Path:
@@ -180,12 +199,15 @@ def extract_links(text: str) -> list[str]:
 class Q115Engine:
     # 登录态校验的缓存时长（秒）：避免每次点菜单都打账号接口
     _AUTH_TTL = 45
+    # 云下载本月配额缓存时长（秒）
+    _QUOTA_TTL = 300
 
     def __init__(self, config: Optional[Config] = None) -> None:
         self.cfg = config or Config()
         self._client: Optional[P115Client] = None
         self._login: Optional[_LoginState] = None
         self._auth_cache: Optional[tuple[float, tuple[bool, str]]] = None
+        self._quota_cache: Optional[tuple[float, tuple[int, int]]] = None
 
     # ---------- 客户端 ----------
 
@@ -216,6 +238,31 @@ class Q115Engine:
     def invalidate_auth(self) -> None:
         """登录/登出后立即失效登录态缓存。"""
         self._auth_cache = None
+
+    def cloud_quota(self) -> tuple[int, int]:
+        """返回云下载本月配额 (剩余, 总量)。5 分钟缓存；失败抛异常。
+
+        数据来自 open 版 get_quota_info（proapi.115.com），web 版该 action 已下线。
+        package 数组里多个来源（VIP/赠送/购买…）求和即总余量。"""
+        now = time.time()
+        if self._quota_cache and now - self._quota_cache[0] < self._QUOTA_TTL:
+            return self._quota_cache[1]
+        resp = self.client().clouddownload_quota_info_open()
+        if resp.get("state") not in (True, 1):
+            raise Q115Error(
+                f"获取云下载配额失败：{resp.get('message') or resp.get('code')}"
+            )
+        surplus = total = 0
+        for pkg in (resp.get("data") or {}).get("package") or []:
+            surplus += int(pkg.get("surplus") or 0)
+            total += int(pkg.get("count") or 0)
+        result = (surplus, total)
+        self._quota_cache = (now, result)
+        return result
+
+    def invalidate_quota(self) -> None:
+        """转存提交后失效配额缓存，下次打开窗口重新拉。"""
+        self._quota_cache = None
 
     def _auth(self) -> tuple[bool, str]:
         now = time.time()
@@ -256,8 +303,9 @@ class Q115Engine:
         """获取二维码：返回二维码 PNG 文件路径（供弹出显示）。"""
         # 注意：官方扫码登录一律使用 web 版 token（/api/1.0/web/1.0/token/），
         # 其他 app 变体（如 mac）返回的 uid 不是可扫码的会话，手机会提示“二维码已过期”。
+        # DNS/连接类瞬时错误自动重试 3 次（间隔 1.5s），网络抖动不再直接弹窗。
         try:
-            resp = P115Client.login_qrcode_token()
+            resp = _retry_transient(lambda: P115Client.login_qrcode_token())
         except Exception as e:
             raise Q115Error(f"获取二维码失败，请检查网络后重试（{e}）") from e
         token = dict(resp.get("data") or {})
@@ -549,6 +597,108 @@ class Q115Engine:
             size = t.get("size") or 0
             out.append({"name": name, "status": status, "status_text": text, "size": size, "raw": t})
         return out
+
+
+    # ---------- 115 分享链接转存 ----------
+
+    def parse_share(self, url: str, receive_code: str | None = None):
+        """解析一个 115 分享链接，返回一个 P115ShareFileSystem 对象。
+
+        支持的链接形如：
+          https://115.com/s/<share_code>?password=<提取码>
+          https://115cdn.com/s/<share_code>
+          https://share.115.com/<share_code>
+          <share_code>[-<提取码>]
+        解析失败或链接失效/提取码错误都会抛出 Q115Error（带中文提示）。
+        """
+        url = (url or "").strip()
+        if not url:
+            raise Q115Error("请先粘贴一个 115 分享链接")
+        try:
+            fs = P115ShareFileSystem.from_url(self.client(), url)
+        except ValueError:
+            raise Q115Error(
+                "这不是一个有效的 115 分享链接。\n"
+                "正确格式形如：https://115.com/s/xxxxxxxx?password=xxxx"
+            )
+        except Exception as e:  # noqa: BLE001
+            raise Q115Error(f"解析分享链接失败：{e}") from e
+        if receive_code:
+            fs.receive_code = receive_code
+        # 触发一次分享数据拉取：链接失效 / 提取码错误会在这里暴露出来
+        try:
+            _ = fs.share_data
+        except Exception as e:  # noqa: BLE001
+            msg = str(e)
+            if "码" in msg or "password" in msg.lower() or "receive_code" in msg:
+                raise Q115Error("提取码错误，请检查分享链接或单独填写提取码") from e
+            raise Q115Error(f"无法读取该分享（链接可能已失效）：{msg}") from e
+        return fs
+
+    def share_info(self, fs) -> dict:
+        """返回分享的元信息：标题 / 分享者 / 文件数。拿不到时返回空字段。"""
+        out = {"title": "", "user": "", "file_count": 0}
+        try:
+            d = getattr(fs, "share_data", None) or {}
+        except Exception:  # noqa: BLE001
+            d = {}
+        info = (d.get("share_info") or {}) if isinstance(d, dict) else {}
+        user = (d.get("userinfo") or {}) if isinstance(d, dict) else {}
+        if isinstance(info, dict):
+            out["title"] = info.get("share_title") or info.get("title") or ""
+            fc = info.get("file_count") or info.get("file_num")
+            if isinstance(fc, int):
+                out["file_count"] = fc
+        if isinstance(user, dict):
+            out["user"] = user.get("user_name") or ""
+        return out
+
+    def share_list(self, fs, cid: str = "0") -> list[dict]:
+        """列出分享里某个目录下的内容（cid 为分享内部的目录 id，根目录传 "0"）。
+
+        返回 [(id, name, is_dir, size), ...]，按「文件夹在前、再按名称」排序。
+        """
+        try:
+            cid_int = int(cid)
+        except (TypeError, ValueError):
+            cid_int = 0
+        try:
+            items = list(fs.iterdir(cid_int))
+        except Exception as e:  # noqa: BLE001
+            raise Q115Error(f"读取分享内容失败：{e}") from e
+        out: list[dict] = []
+        for a in items:
+            out.append({
+                "id": str(a.get("id") or ""),
+                "name": a.get("name") or "(未命名)",
+                "is_dir": bool(a.get("is_dir")),
+                "size": a.get("size") or 0,
+            })
+        out.sort(key=lambda x: (not x["is_dir"], x["name"].lower()))
+        return out
+
+    def share_receive(self, fs, file_ids: list[str], to_pid: str | int) -> dict:
+        """把选中的分享文件/文件夹转存到我的网盘 to_pid 目录。
+
+        file_ids 是分享内部的 file_id 列表；to_pid 是我的网盘目录 cid。
+        文件夹的 file_id 会连同其整个子树一起转存（115 服务端递归处理）。
+        返回接口原始响应；出错抛出 Q115Error（含中文提示）。
+        """
+        ids = [str(i) for i in file_ids if str(i).strip()]
+        if not ids:
+            raise Q115Error("没有选中任何要转存的项目")
+        log(f"[share] receive ids={ids} to_pid={to_pid}")
+        try:
+            resp = fs.receive(ids, to_pid=int(to_pid))
+        except Exception as e:
+            msg = str(e)
+            log(f"[share] receive 失败: {msg}")
+            if "码" in msg or "password" in msg.lower() or "receive_code" in msg:
+                raise Q115Error("提取码错误，请检查分享链接或单独填写提取码") from e
+            if "重复" in msg or "已存在" in msg:
+                raise Q115Error("该分享内容已转存过（目标目录里已存在同名文件）") from e
+            raise Q115Error(f"转存失败：{msg}") from e
+        return resp
 
 
 # ---------------------------------------------------------------------------

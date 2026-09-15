@@ -66,6 +66,7 @@ from AppKit import (
     NSTextField,
     NSTextView,
     NSView,
+    NSViewHeightSizable,
     NSViewWidthSizable,
     NSWindowBelow,
 )
@@ -233,6 +234,7 @@ class _TransferPanel:
         # 统一在构造函数里预置，再给消费端加空值守卫，才是治本 —— 别再逐个补了。
         self._editor = None
         self._ph_label = None
+        self._quota_lab = None
         self._count_label = None
         self._focus_ring = None
         self._btn_ok = None
@@ -299,6 +301,18 @@ class _TransferPanel:
         place(sub, 70, 51, W - 96, 16, root)
         root.addSubview_(sub)
 
+        # 本月云下载配额：显示在账号名右侧，后台拉取后回主线程填充
+        qx = 70
+        try:
+            qx = 70 + sub.intrinsicContentSize().width + 14
+        except Exception:  # noqa: BLE001
+            pass
+        qlab = make_label("", 12.0, 0.0, NSColor.secondaryLabelColor())
+        qlab.setHidden_(True)
+        place(qlab, qx, 51, max(W - qx - PAD, 40), 16, root)
+        root.addSubview_(qlab)
+        self._quota_lab = qlab
+
         sep = make_separator(W)
         place(sep, 0, HEADER, W, 1, root)
         root.addSubview_(sep)
@@ -312,6 +326,23 @@ class _TransferPanel:
         self._build_link_area(content)
         self._build_folder_area(content)
         self._build_footer(root)
+
+        threading.Thread(target=self._quota_worker, daemon=True).start()
+
+    def _quota_worker(self) -> None:
+        """后台线程：拉本月配额，回主线程填充 label；失败保持隐藏。"""
+        try:
+            surplus, total = self.engine.cloud_quota()
+        except Exception:  # noqa: BLE001
+            return
+
+        def show() -> None:
+            if self._closed or self._quota_lab is None:
+                return
+            self._quota_lab.setStringValue_(f"本月配额：剩{surplus}/总{total}个")
+            self._quota_lab.setHidden_(False)
+
+        self._post_main(show)
 
     def _build_link_area(self, root) -> None:
         lab = make_section_title("链接")
@@ -476,8 +507,29 @@ class _TransferPanel:
         table.setAction_(bridge_action(self._bridge, "cellClick"))
         table.setDoubleAction_(bridge_action(self._bridge, "rowDouble"))
         scroll.setDocumentView_(table)
+        scroll.setHasHorizontalScroller_(False)
+        try:
+            scroll.setHorizontalScrollElasticity_(0)
+        except Exception:  # noqa: BLE001
+            pass
         card.addSubview_(scroll)
+        # 锁列宽（彻底消除横向滚动）：固定设计宽度 iw-16，恒 <= clip 最小可见宽。
+        scroll.setClipsToBounds_(True)
+        table.setClipsToBounds_(True)
+        cv = scroll.contentView()
+        cv.setClipsToBounds_(True)
+        col_w = iw - 24
+        col.setWidth_(col_w)
+        col.setMinWidth_(col_w)
+        col.setMaxWidth_(col_w)
+        t_f = table.frame()
+        t_f.origin.x = 0
+        t_f.size.width = col_w
+        table.setFrame_(t_f)
+        card.setAutoresizingMask_(NSViewWidthSizable | NSViewHeightSizable)
+        scroll.setAutoresizingMask_(NSViewWidthSizable | NSViewHeightSizable)
         self._table = table
+        self._col = col
         self._list_wrap = scroll
 
         spin = make_spinner(20.0)
@@ -856,6 +908,7 @@ class _TransferPanel:
         resp = None
         try:
             resp = self.engine.submit_links(links, dir_id=(cid or "0"))
+            self.engine.invalidate_quota()
         except Exception as e:  # noqa: BLE001
             error = f"{type(e).__name__}: {e}"
             log("[panel] 提交异常:\n" + traceback.format_exc())
@@ -1055,14 +1108,15 @@ class _TransferPanel:
 
         view = tv.makeViewWithIdentifier_owner_("q115row", None)
         if view is None:
-            w = tv.bounds().size.width or 500
+            cols0 = tv.tableColumns()
+            w = int(cols0[0].width()) if cols0 else 574
             view = NSTableCellView.alloc().initWithFrame_(NSMakeRect(0, 0, w, 32))
             view.setIdentifier_("q115row")
             view.setAutoresizingMask_(NSViewWidthSizable)
 
             iv = NSImageView.alloc().initWithFrame_(NSMakeRect(11, 8, 17, 17))
             iv.setImageScaling_(NSScaleProportionally)
-            tf = NSTextField.alloc().initWithFrame_(NSMakeRect(38, 7, w - 66, 19))
+            tf = NSTextField.alloc().initWithFrame_(NSMakeRect(38, 7, w - 130, 19))
             tf.setBezeled_(False)
             tf.setDrawsBackground_(False)
             tf.setEditable_(False)
@@ -1082,16 +1136,19 @@ class _TransferPanel:
             view.addSubview_(tf)
             view.addSubview_(cv)
 
-        # 行宽随窗口变化，chevron 每次都要贴回右边缘
+        # 行宽随窗口变化，chevron / 文本框每次都按实际行宽重排
+        cols0 = tv.tableColumns()
+        cw = int(cols0[0].width()) if cols0 else 574
         cv = view.viewWithTag_(99)
         if cv is not None:
-            cv.setFrame_(NSMakeRect(tv.bounds().size.width - 26, 10, 12, 12))
+            cv.setFrame_(NSMakeRect(cw - 26, 10, 12, 12))
             try:
                 is_sel = (tv.selectedRow() == row)
             except Exception:  # noqa: BLE001
                 is_sel = False
             cv.setImage_(self.chevron_icon(is_sel))
 
+        view.textField().setFrame_(NSMakeRect(38, 7, max(cw - 130, 60), 19))
         view.textField().setStringValue_(self.row_name(row))
         fi = self.folder_icon()
         if fi is not None:

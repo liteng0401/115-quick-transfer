@@ -148,10 +148,50 @@ def show_qr_image(png_path: str) -> None:
         pass
 
 
-def notify(title: str, msg: str) -> None:
+def _app_icon_path() -> str | None:
+    """取打包进 .app 的应用图标（AppIcon.icns）路径，用于设置通知图标，
+    避免通知沿用「运行中的旧进程 / 系统图标缓存」而与新桌面图标不一致。"""
     try:
-        rumps.notification(title=title, subtitle="", message=msg, sound=False)
+        from Foundation import NSBundle
+        p = NSBundle.mainBundle().pathForResource_ofType_("AppIcon", "icns")
+        if p and os.path.exists(p):
+            return p
     except Exception:
+        pass
+    # 源码直跑兜底：从本文件同级 assets 取
+    cand = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "AppIcon.icns")
+    if os.path.exists(cand):
+        return cand
+    return None
+
+
+def notify(title: str, msg: str) -> None:
+    """发送 macOS 通知。显式把打包进 .app 的应用图标设为通知图标，
+    避免沿用「运行中的旧进程 / 系统图标缓存」而与新桌面图标不一致。"""
+    try:
+        from AppKit import NSImage
+        from Foundation import (
+            NSDate,
+            NSUserNotification,
+            NSUserNotificationCenter,
+        )
+    except Exception:
+        return
+    try:
+        n = NSUserNotification.alloc().init()
+        n.setTitle_(title)
+        n.setInformativeText_(msg)
+        icon = _app_icon_path()
+        if icon:
+            img = NSImage.alloc().initWithContentsOfFile_(icon)
+            if img is not None:
+                try:
+                    n.set_identityImage_(img)
+                except Exception:  # noqa: BLE001
+                    pass
+        n.setDeliveryDate_(NSDate.dateWithTimeInterval_sinceDate_(0, NSDate.date()))
+        NSUserNotificationCenter.defaultUserNotificationCenter().scheduleNotification_(n)
+    except Exception:  # noqa: BLE001
         pass
 
 
@@ -406,7 +446,8 @@ class Q115App(rumps.App):
         self._auth_pending = False     # 正在后台查登录态
         self._auth_result = (False, "")
 
-        self.mi_transfer = rumps.MenuItem("转存剪贴板里的链接", callback=self.on_transfer)
+        self.mi_transfer = rumps.MenuItem("添加云下载", callback=self.on_transfer)
+        self.mi_share = rumps.MenuItem("转存 115 分享链接", callback=self.on_share)
         self.mi_status = rumps.MenuItem("状态：检查中", callback=self.on_refresh_status)
         self.mi_login = rumps.MenuItem(LOGIN_LABEL, callback=self.on_login)
         # 「关于」项不带版本号 —— 菜单栏位置窄，版本号放在点开后的弹窗里显示。
@@ -419,6 +460,7 @@ class Q115App(rumps.App):
             template=True,    # 模板模式：菜单栏自动适配深浅色
             menu=[
                 self.mi_transfer,
+                self.mi_share,
                 None,
                 self.mi_status,
                 self.mi_login,
@@ -867,6 +909,92 @@ class Q115App(rumps.App):
         log(f"[transfer] 本次保存到：{folder}，共 {len(links)} 条")
         notify(APP_DISPLAY, f"已提交 {len(links)} 条云下载任务 → {shown}")
 
+    def on_share(self, _sender=None) -> None:
+        if self._busy:
+            return
+        if not self.engine.is_logged_in():
+            rumps.alert(
+                title="尚未登录",
+                message=f"请先点击「{LOGIN_LABEL}」，用手机 115 扫码登录。",
+                ok="知道了",
+            )
+            return
+        clip = clipboard_text()
+        # 原生主窗口会自己完成：解析链接 → 选文件 → 选目录 → 提交 → 结果动画。
+        result = self._run_share_panel(clip)
+        if result is None:
+            return  # 用户取消；或走了回退流程（它自己会通知）
+        count, folder = result
+        if folder != "/":
+            self.engine.cfg.last_path = folder  # 记住本次目录，下次转存从这里开始
+        shown = "根目录" if folder == "/" else folder
+        log(f"[share] 转存完成 → {folder}，共 {count} 项")
+        notify(APP_DISPLAY, f"已转存 {count} 个项目 → {shown}")
+
+    def _run_share_panel(self, clip: str):
+        """优先用原生分享转存主窗口；UI 层出任何问题都自动退回旧的文字流程。"""
+        try:
+            from ui_share import run_share_panel
+
+            return run_share_panel(self.engine, clip,
+                                   start=self.engine.cfg.last_path)
+        except Exception:  # noqa: BLE001
+            log("[share] 原生主窗口不可用，回退旧流程:\n" + traceback.format_exc())
+            return self._legacy_share_flow(clip)
+
+    def _legacy_share_flow(self, clip: str):
+        """（回退方案）旧的文字流程：输入框 + 目录选择窗 + 后台提交。"""
+        resp = rumps.Window(
+            message="粘贴 115 分享链接（可带 ?password= 提取码）",
+            title="转存 115 分享链接",
+            default_text=clip,
+            ok="解析", cancel="取消",
+            dimensions=(460, 40),
+        ).run()
+        if resp.clicked != 1:
+            return
+        url = (resp.text or "").strip()
+        if not url:
+            return
+        try:
+            fs = self.engine.parse_share(url)
+            info = self.engine.share_info(fs)
+            items = self.engine.share_list(fs, "0")
+        except Q115Error as e:
+            rumps.alert(title="无法解析", message=str(e), ok="知道了")
+            return
+        if not items:
+            rumps.alert(title="空分享", message="该分享里没有可转存的内容。", ok="知道了")
+            return
+        picked = self._pick_save_folder(start=self.engine.cfg.last_path)
+        if picked is None:
+            return
+        folder, cid = picked
+        if folder != "/":
+            self.engine.cfg.last_path = folder
+        ids = [it["id"] for it in items]
+        self._busy = True
+        threading.Thread(
+            target=self._share_submit_worker, args=(fs, ids, folder, cid), daemon=True
+        ).start()
+        self.ensure_poll_timer()
+
+    def _share_submit_worker(self, fs, ids: list[str], folder: str, cid: str | None = None) -> None:
+        error: str | None = None
+        try:
+            self.engine.share_receive(fs, ids, cid or "0")
+        except Q115Error as e:
+            error = str(e)
+        except Exception as e:  # noqa: BLE001
+            error = f"{type(e).__name__}: {e}"
+            log("[share] 提交异常:\n" + traceback.format_exc())
+        self._busy = False
+        if error:
+            self.notify_main(APP_DISPLAY, "转存失败：" + error)
+        else:
+            shown = "根目录" if folder == "/" else folder
+            self.notify_main(APP_DISPLAY, f"已转存 {len(ids)} 个项目 → {shown}")
+
     def _run_main_panel(self, clip: str):
         """优先用原生主窗口；UI 层出任何问题都自动退回旧的文字流程。"""
         try:
@@ -932,7 +1060,7 @@ class Q115App(rumps.App):
 
     def _submit_done(self, links: list[str], folder: str, error: str | None, resp=None) -> None:
         self._busy = False
-        self.mi_transfer.title = "转存剪贴板里的链接"
+        self.mi_transfer.title = "添加云下载"
         if error:
             log(f"[transfer] 提交失败: {error}")
             self.notify_main(APP_DISPLAY, "提交失败：" + error)
